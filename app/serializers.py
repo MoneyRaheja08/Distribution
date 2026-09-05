@@ -35,6 +35,7 @@ def public_user(u):
         "name": u["name"],
         "role": u["role"],
         "price_list_access": u.get("price_list_access", False),
+        "can_collect": u.get("can_collect", False),
     }
 
 

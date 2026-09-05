@@ -120,7 +120,7 @@ async def add_bill(did: str, body: BillIn, _=Depends(staff_only)):
 
 
 @router.post("/{did}/seed")
-async def seed_ledger(did: str, body: SeedIn, _=Depends(staff_only)):
+async def seed_ledger(did: str, body: SeedIn, _=Depends(require_roles("admin"))):
     """Replace a dealer's whole ledger from an imported statement (one-time seed)."""
     if not await db.dealers.find_one({"_id": did}):
         raise HTTPException(404, "Dealer not found")

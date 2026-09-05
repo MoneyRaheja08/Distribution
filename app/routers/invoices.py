@@ -27,7 +27,8 @@ async def parse_invoice(file: UploadFile = File(...), _=Depends(staff_only)):
     bill_no = find(r"Invoice No\.?\s*:\s*(\S+)")
     d = find(r"Date\s*:\s*(\d{2}/\d{2}/\d{4})")
     party = find(r"Name\s*:\s*([A-Z0-9 &.\-]+)")
-    total = find(r"GRAND TOTAL[^\d]*([\d,]+\.\d{2})")
+    totals = re.findall(r"GRAND TOTAL[^\d]*([\d,]+\.\d{2})", txt)
+    total = totals[-1] if totals else None  # last page's grand total on multi-page invoices
     date_iso = None
     if d:
         dd, mm, yy = d.split("/")

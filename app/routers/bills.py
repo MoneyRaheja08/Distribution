@@ -11,7 +11,7 @@ staff_only = require_roles("admin", "manager")
 
 
 @router.post("/bulk")
-async def bulk_bills(body: BulkBills, _=Depends(staff_only)):
+async def bulk_bills(body: BulkBills, _=Depends(require_roles("admin"))):
     """Add many bills at once. Rows match a dealer by id, or by name (case-insensitive)."""
     dealers = [d async for d in db.dealers.find()]
     by_id = {d["_id"]: d for d in dealers}

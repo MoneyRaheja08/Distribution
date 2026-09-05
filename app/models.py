@@ -14,6 +14,7 @@ class Mode(str, Enum):
     cash = "Cash"
     cheque = "Cheque"
     upi = "UPI"
+    rtgs = "RTGS"
 
 
 class Ageing(BaseModel):
@@ -41,6 +42,7 @@ class UserIn(BaseModel):
     pin: str = Field(min_length=4, max_length=8)
     role: Role = Role.collector
     price_list_access: bool = False
+    can_collect: bool = False
 
 
 class UserPatch(BaseModel):
@@ -48,6 +50,7 @@ class UserPatch(BaseModel):
     pin: Optional[str] = Field(default=None, min_length=4, max_length=8)
     role: Optional[Role] = None
     price_list_access: Optional[bool] = None
+    can_collect: Optional[bool] = None
 
 
 # ---- dealers ----
