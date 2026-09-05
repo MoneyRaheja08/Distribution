@@ -108,6 +108,14 @@ async def approve_payment(pid: str, body: ApproveIn, _=Depends(staff_only)):
     return {"ok": True}
 
 
+@router.delete("/{pid}")
+async def delete_payment(pid: str, _=Depends(require_roles("admin"))):
+    r = await db.payments.delete_one({"_id": pid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Payment not found")
+    return {"ok": True}
+
+
 @router.get("/summary")
 async def dashboard(_=Depends(staff_only)):
     dealers = [d async for d in db.dealers.find()]

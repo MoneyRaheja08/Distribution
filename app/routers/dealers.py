@@ -59,7 +59,7 @@ async def dealer_ledger(did: str, user=Depends(get_current_user)):
     for p in pays:
         if p.get("status") == "bounced" or not p.get("approved", True):
             continue
-        rows.append({"date": p.get("date"), "type": "payment", "ref": p.get("cheque") or p.get("mode"),
+        rows.append({"id": p["_id"], "date": p.get("date"), "type": "payment", "ref": p.get("cheque") or p.get("mode"),
                      "debit": 0, "credit": p["amount"], "mode": p.get("mode")})
     rows.sort(key=lambda r: (r["date"] or "0000-00-00"))
     bal = 0
