@@ -16,7 +16,10 @@ async def bulk_bills(body: BulkBills, _=Depends(staff_only)):
     dealers = [d async for d in db.dealers.find()]
     by_id = {d["_id"]: d for d in dealers}
     by_name = {d["name"].strip().lower(): d for d in dealers}
-    added, unmatched = 0, []
+    existing = set()
+    async for b in db.bills.find({}, {"dealer_id": 1, "bill_no": 1}):
+        existing.add((b["dealer_id"], (b.get("bill_no") or "").strip().lower()))
+    added, unmatched, duplicates = 0, [], []
     docs = []
     for r in body.bills:
         d = by_id.get(r.dealer_id) if r.dealer_id else None
@@ -25,9 +28,14 @@ async def bulk_bills(body: BulkBills, _=Depends(staff_only)):
         if not d:
             unmatched.append(r.dealer_name or r.dealer_id or "?")
             continue
+        key = (d["_id"], (r.bill_no or "").strip().lower())
+        if key in existing:
+            duplicates.append(r.bill_no)
+            continue
+        existing.add(key)
         docs.append({"_id": uuid.uuid4().hex, "dealer_id": d["_id"], "bill_no": r.bill_no,
                      "date": r.date, "amount": r.amount, "source": "bulk"})
         added += 1
     if docs:
         await db.bills.insert_many(docs)
-    return {"ok": True, "added": added, "unmatched": unmatched}
+    return {"ok": True, "added": added, "unmatched": unmatched, "duplicates": duplicates}

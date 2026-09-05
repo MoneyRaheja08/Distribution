@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import date
 
@@ -66,7 +67,8 @@ async def dealer_ledger(did: str, user=Depends(get_current_user)):
         bal += r["debit"] - r["credit"]
         r["balance"] = round(bal)
     summ = compute(bills, pays)
-    return {"dealer": d["name"], "outstanding": summ["outstanding"], "last_payment": summ["last_payment"], "entries": rows}
+    return {"dealer": d["name"], "outstanding": summ["outstanding"], "ageing": summ["ageing"],
+            "last_payment": summ["last_payment"], "credit_limit": d.get("credit_limit", 0), "entries": rows}
 
 
 @router.post("")
@@ -108,6 +110,10 @@ async def delete_dealer(did: str, _=Depends(require_roles("admin"))):
 async def add_bill(did: str, body: BillIn, _=Depends(staff_only)):
     if not await db.dealers.find_one({"_id": did}):
         raise HTTPException(404, "Dealer not found")
+    dupe = await db.bills.find_one({"dealer_id": did,
+                                    "bill_no": {"$regex": f"^{re.escape(body.bill_no.strip())}$", "$options": "i"}})
+    if dupe:
+        raise HTTPException(409, f"Bill {body.bill_no.strip()} already exists for this dealer")
     await db.bills.insert_one({"_id": uuid.uuid4().hex, "dealer_id": did, "bill_no": body.bill_no.strip(),
                                "date": body.date, "amount": body.amount, "source": "manual"})
     return {"ok": True, "summary": await _summary(did)}
