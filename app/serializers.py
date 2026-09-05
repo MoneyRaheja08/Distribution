@@ -73,6 +73,8 @@ def public_payment(p):
         "status": p["status"],
         "deposited": p.get("deposited", False),
         "approved": p.get("approved", True),
+        "approved_by": p.get("approved_by"),
+        "reconciled": p.get("reconciled", False),
     }
 
 

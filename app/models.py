@@ -105,6 +105,10 @@ class ApproveIn(BaseModel):
     approved: bool
 
 
+class ReconcileIn(BaseModel):
+    reconciled: bool
+
+
 # ---- products / price list ----
 class ProductIn(BaseModel):
     category: str

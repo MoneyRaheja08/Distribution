@@ -8,7 +8,7 @@ from pymongo import ReturnDocument
 from ..auth import get_current_user, is_staff, require_roles
 from ..db import db
 from ..ledger import compute
-from ..models import ApproveIn, ChequeUpdate, CollectIn, DepositIn
+from ..models import ApproveIn, ChequeUpdate, CollectIn, DepositIn, ReconcileIn
 from ..serializers import public_payment
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -48,7 +48,8 @@ async def record_collection(body: CollectIn, user=Depends(get_current_user)):
                "collector_id": user["_id"], "collector_name": user["name"], "amount": body.amount,
                "mode": body.mode.value, "cheque": (body.cheque or "").strip(), "date": date.today().isoformat(),
                "ts": datetime.now(timezone.utc), "receipt": receipt,
-               "status": "pending" if pending else "cleared", "deposited": False, "approved": approved}
+               "status": "pending" if pending else "cleared", "deposited": False, "approved": approved,
+               "approved_by": (user["name"] if approved else None), "reconciled": False}
     await db.payments.insert_one(payment)
     out = public_payment(payment)
     out["new_outstanding"] = (await _summary(dealer["_id"]))["outstanding"]
@@ -102,7 +103,7 @@ async def approve_payment(pid: str, body: ApproveIn, _=Depends(staff_only)):
     if p.get("approved", True):
         raise HTTPException(400, "Already approved")
     if body.approved:
-        await db.payments.update_one({"_id": pid}, {"$set": {"approved": True}})
+        await db.payments.update_one({"_id": pid}, {"$set": {"approved": True, "approved_by": _["name"]}})
     else:
         await db.payments.delete_one({"_id": pid})
     return {"ok": True}
@@ -112,6 +113,24 @@ async def approve_payment(pid: str, body: ApproveIn, _=Depends(staff_only)):
 async def delete_payment(pid: str, _=Depends(require_roles("admin"))):
     r = await db.payments.delete_one({"_id": pid})
     if r.deleted_count == 0:
+        raise HTTPException(404, "Payment not found")
+    return {"ok": True}
+
+
+@router.get("/collections")
+async def collections(reconciled: Optional[bool] = None, _=Depends(require_roles("admin"))):
+    q = {"approved": {"$ne": False}, "collector_id": {"$nin": [None, "seed"]}}
+    if reconciled is True:
+        q["reconciled"] = True
+    elif reconciled is False:
+        q["reconciled"] = {"$ne": True}
+    return [public_payment(p) async for p in db.payments.find(q).sort("ts", -1)]
+
+
+@router.patch("/{pid}/reconcile")
+async def reconcile_payment(pid: str, body: ReconcileIn, _=Depends(require_roles("admin"))):
+    r = await db.payments.update_one({"_id": pid}, {"$set": {"reconciled": body.reconciled}})
+    if r.matched_count == 0:
         raise HTTPException(404, "Payment not found")
     return {"ok": True}
 
