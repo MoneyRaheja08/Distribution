@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import db
-from .routers import auth, dealers, payments, pricelists, stock, users
+from .routers import auth, bills, dealers, invoices, payments, pricelists, stock, users
 
 
 @asynccontextmanager
@@ -16,6 +16,8 @@ async def lifespan(app: FastAPI):
         await db.dealers.create_index("collector_id")
         await db.payments.create_index([("collector_id", 1), ("date", 1)])
         await db.pricelists.create_index("name")
+        await db.bills.create_index("dealer_id")
+        await db.payments.create_index("dealer_id")
     except Exception:
         pass
     yield
@@ -38,6 +40,8 @@ app.include_router(dealers.router)
 app.include_router(stock.router)
 app.include_router(payments.router)
 app.include_router(pricelists.router)
+app.include_router(bills.router)
+app.include_router(invoices.router)
 
 
 @app.get("/health")

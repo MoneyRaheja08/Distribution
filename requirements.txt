@@ -5,3 +5,5 @@ pydantic>=2.6
 pydantic-settings>=2.2
 PyJWT>=2.7
 bcrypt>=4.1
+pypdf>=4.0
+python-multipart>=0.0.9

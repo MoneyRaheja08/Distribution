@@ -139,3 +139,35 @@ class PriceListIn(BaseModel):
 class PriceListPatch(BaseModel):
     name: Optional[str] = None
     allowed_user_ids: Optional[list[str]] = None
+
+
+# ---- bills / ledger ----
+class BillIn(BaseModel):
+    bill_no: str
+    date: str          # YYYY-MM-DD
+    amount: float = Field(gt=0)
+
+
+class SeedPayment(BaseModel):
+    ref: Optional[str] = ""
+    date: Optional[str] = None
+    amount: float
+
+
+class SeedIn(BaseModel):
+    opening: float = 0
+    opening_date: Optional[str] = None
+    bills: list[BillIn] = []
+    payments: list[SeedPayment] = []
+
+
+class BulkBillRow(BaseModel):
+    dealer_id: Optional[str] = None
+    dealer_name: Optional[str] = None
+    bill_no: str
+    date: str
+    amount: float
+
+
+class BulkBills(BaseModel):
+    bills: list[BulkBillRow]
