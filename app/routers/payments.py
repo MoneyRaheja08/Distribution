@@ -8,7 +8,7 @@ from pymongo import ReturnDocument
 from ..auth import get_current_user, is_staff, require_roles
 from ..db import db
 from ..ledger import compute
-from ..models import ChequeUpdate, CollectIn, DepositIn
+from ..models import ApproveIn, ChequeUpdate, CollectIn, DepositIn
 from ..serializers import public_payment
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -43,11 +43,12 @@ async def record_collection(body: CollectIn, user=Depends(get_current_user)):
         raise HTTPException(400, "Cheque number/bank is required for cheque payments")
     receipt = await _next_receipt()
     pending = body.mode.value == "Cheque"
+    approved = user["role"] != "collector"   # collector payments need approval
     payment = {"_id": uuid.uuid4().hex, "dealer_id": dealer["_id"], "dealer_name": dealer["name"],
                "collector_id": user["_id"], "collector_name": user["name"], "amount": body.amount,
                "mode": body.mode.value, "cheque": (body.cheque or "").strip(), "date": date.today().isoformat(),
                "ts": datetime.now(timezone.utc), "receipt": receipt,
-               "status": "pending" if pending else "cleared", "deposited": False}
+               "status": "pending" if pending else "cleared", "deposited": False, "approved": approved}
     await db.payments.insert_one(payment)
     out = public_payment(payment)
     out["new_outstanding"] = (await _summary(dealer["_id"]))["outstanding"]
@@ -70,7 +71,7 @@ async def list_payments(dealer_id: Optional[str] = None, status: Optional[str] =
 
 
 @router.patch("/{pid}/cheque")
-async def update_cheque(pid: str, body: ChequeUpdate, _=Depends(staff_only)):
+async def update_cheque(pid: str, body: ChequeUpdate, _=Depends(require_roles("admin"))):
     p = await db.payments.find_one({"_id": pid})
     if not p:
         raise HTTPException(404, "Payment not found")
@@ -81,11 +82,30 @@ async def update_cheque(pid: str, body: ChequeUpdate, _=Depends(staff_only)):
 
 
 @router.post("/deposit")
-async def deposit_cash(body: DepositIn, _=Depends(staff_only)):
+async def deposit_cash(body: DepositIn, _=Depends(require_roles("admin"))):
     r = await db.payments.update_many(
         {"collector_id": body.collector_id, "mode": "Cash", "deposited": False, "status": "cleared"},
         {"$set": {"deposited": True}})
     return {"ok": True, "marked": r.modified_count}
+
+
+@router.get("/pending")
+async def pending_approvals(_=Depends(staff_only)):
+    return [public_payment(p) async for p in db.payments.find({"approved": False}).sort("ts", -1)]
+
+
+@router.patch("/{pid}/approve")
+async def approve_payment(pid: str, body: ApproveIn, _=Depends(staff_only)):
+    p = await db.payments.find_one({"_id": pid})
+    if not p:
+        raise HTTPException(404, "Payment not found")
+    if p.get("approved", True):
+        raise HTTPException(400, "Already approved")
+    if body.approved:
+        await db.payments.update_one({"_id": pid}, {"$set": {"approved": True}})
+    else:
+        await db.payments.delete_one({"_id": pid})
+    return {"ok": True}
 
 
 @router.get("/summary")
@@ -103,7 +123,8 @@ async def dashboard(_=Depends(staff_only)):
         s = compute(bills_by.get(d["_id"], []), pays_by.get(d["_id"], []))
         total_out += s["outstanding"]
         over90 += s["ageing"].get("age_90p", 0)
-    field_pays = [p for p in all_pays if p.get("collector_id") not in (None, "seed")]
+    field_pays = [p for p in all_pays if p.get("collector_id") not in (None, "seed") and p.get("approved", True)]
+    pending_count = sum(1 for p in all_pays if p.get("approved") is False)
     collected_today = sum(p["amount"] for p in field_pays if p["date"] == today and p["status"] != "bounced")
     cash_undeposited = sum(p["amount"] for p in field_pays
                            if p["mode"] == "Cash" and not p.get("deposited") and p["status"] == "cleared")
@@ -116,4 +137,5 @@ async def dashboard(_=Depends(staff_only)):
         assigned = sum(1 for d in dealers if d.get("collector_id") == u["_id"])
         per_collector.append({"id": u["_id"], "name": u["name"], "dealers": assigned, "collected_today": got})
     return {"total_outstanding": total_out, "over_90_days": over90, "collected_today": collected_today,
-            "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending, "per_collector": per_collector}
+            "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending,
+            "pending_approvals": pending_count, "per_collector": per_collector}

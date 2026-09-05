@@ -72,6 +72,7 @@ def public_payment(p):
         "receipt": p["receipt"],
         "status": p["status"],
         "deposited": p.get("deposited", False),
+        "approved": p.get("approved", True),
     }
 
 

@@ -101,6 +101,10 @@ class DepositIn(BaseModel):
     collector_id: str
 
 
+class ApproveIn(BaseModel):
+    approved: bool
+
+
 # ---- products / price list ----
 class ProductIn(BaseModel):
     category: str

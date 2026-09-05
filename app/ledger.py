@@ -25,7 +25,9 @@ def compute(bills, payments, today=None):
     Payments clear oldest bills first (FIFO); unpaid remainder ages by bill date."""
     today = today or date.today()
     bills_sorted = sorted(bills, key=lambda b: (b.get("date") or "9999-99-99"))
-    pool = sum(float(p["amount"]) for p in payments if p.get("status") != "bounced")
+    def counts(x):
+        return x.get("status") != "bounced" and x.get("approved", True)
+    pool = sum(float(p["amount"]) for p in payments if counts(p))
     ageing = {k: 0.0 for k in BUCKETS}
     outstanding = 0.0
     for b in bills_sorted:
@@ -38,7 +40,7 @@ def compute(bills, payments, today=None):
             d = _parse(b.get("date"))
             days = (today - d).days if d else 0
             ageing[bucket_for(days)] += unpaid
-    live = [p for p in payments if p.get("status") != "bounced"]
+    live = [p for p in payments if counts(p)]
     last = max(live, key=lambda p: p.get("date") or "", default=None)
     return {
         "outstanding": round(outstanding),

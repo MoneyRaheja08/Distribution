@@ -57,7 +57,7 @@ async def dealer_ledger(did: str, user=Depends(get_current_user)):
     for b in bills:
         rows.append({"date": b.get("date"), "type": "bill", "ref": b.get("bill_no"), "debit": b["amount"], "credit": 0})
     for p in pays:
-        if p.get("status") == "bounced":
+        if p.get("status") == "bounced" or not p.get("approved", True):
             continue
         rows.append({"date": p.get("date"), "type": "payment", "ref": p.get("cheque") or p.get("mode"),
                      "debit": 0, "credit": p["amount"], "mode": p.get("mode")})
