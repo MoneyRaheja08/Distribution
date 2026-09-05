@@ -1,6 +1,6 @@
 import re
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo import ReturnDocument
@@ -31,7 +31,11 @@ async def list_dealers(user=Depends(get_current_user)):
         bills_by.setdefault(b["dealer_id"], []).append(b)
     async for p in db.payments.find({"dealer_id": {"$in": ids}}):
         pays_by.setdefault(p["dealer_id"], []).append(p)
-    return [public_dealer(d, compute(bills_by.get(d["_id"], []), pays_by.get(d["_id"], []))) for d in dealers]
+    today = date.today().isoformat()
+    visited = set()
+    async for v in db.visits.find({"user_id": user["_id"], "date": today}):
+        visited.add(v["dealer_id"])
+    return [public_dealer(d, compute(bills_by.get(d["_id"], []), pays_by.get(d["_id"], [])), d["_id"] in visited) for d in dealers]
 
 
 @router.get("/{did}")
@@ -41,7 +45,9 @@ async def get_dealer(did: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Dealer not found")
     if not is_staff(user) and d.get("collector_id") != user["_id"]:
         raise HTTPException(403, "Not your dealer")
-    return public_dealer(d, await _summary(did))
+    today = date.today().isoformat()
+    v = await db.visits.find_one({"user_id": user["_id"], "dealer_id": did, "date": today})
+    return public_dealer(d, await _summary(did), bool(v))
 
 
 @router.get("/{did}/ledger")
@@ -143,3 +149,22 @@ async def seed_ledger(did: str, body: SeedIn, _=Depends(require_roles("admin")))
     if pdocs:
         await db.payments.insert_many(pdocs)
     return {"ok": True, "summary": await _summary(did)}
+
+
+@router.post("/{did}/visit")
+async def mark_visited(did: str, user=Depends(get_current_user)):
+    d = await db.dealers.find_one({"_id": did})
+    if not d:
+        raise HTTPException(404, "Dealer not found")
+    if not is_staff(user) and d.get("collector_id") != user["_id"]:
+        raise HTTPException(403, "Not your dealer")
+    today = date.today().isoformat()
+    now = datetime.now(timezone.utc)
+    await db.visits.update_one(
+        {"dealer_id": did, "user_id": user["_id"], "date": today},
+        {"$setOnInsert": {"_id": uuid.uuid4().hex, "dealer_id": did, "dealer_name": d["name"],
+                          "user_id": user["_id"], "user_name": user["name"], "role": user["role"],
+                          "date": today, "first_ts": now},
+         "$set": {"last_ts": now}},
+        upsert=True)
+    return {"ok": True}

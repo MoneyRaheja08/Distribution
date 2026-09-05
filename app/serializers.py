@@ -39,7 +39,7 @@ def public_user(u):
     }
 
 
-def public_dealer(d, summary=None):
+def public_dealer(d, summary=None, visited_today=False):
     summary = summary or {"outstanding": 0, "ageing": {}, "last_payment": None}
     return {
         "id": d["_id"],
@@ -51,6 +51,7 @@ def public_dealer(d, summary=None):
         "ageing": summary["ageing"],
         "outstanding": summary["outstanding"],
         "last_payment": summary["last_payment"],
+        "visited_today": visited_today,
     }
 
 
