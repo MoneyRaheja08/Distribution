@@ -47,3 +47,28 @@ def compute(bills, payments, today=None):
         "ageing": {k: round(v) for k, v in ageing.items()},
         "last_payment": ({"amount": last["amount"], "date": last.get("date")} if last else None),
     }
+
+
+def bill_breakdown(bills, payments, today=None):
+    """Per-bill ageing: each still-unpaid bill with its unpaid amount, age and bucket
+    (payments applied oldest-first, same FIFO as compute)."""
+    today = today or date.today()
+    bills_sorted = sorted(bills, key=lambda b: (b.get("date") or "9999-99-99"))
+
+    def counts(x):
+        return x.get("status") != "bounced" and x.get("approved", True)
+
+    pool = sum(float(p["amount"]) for p in payments if counts(p))
+    out = []
+    for b in bills_sorted:
+        amt = float(b.get("amount") or 0)
+        paid = min(pool, amt)
+        pool -= paid
+        unpaid = amt - paid
+        if unpaid > 0.5:
+            d = _parse(b.get("date"))
+            days = (today - d).days if d else 0
+            out.append({"bill_no": b.get("bill_no"), "date": b.get("date"),
+                        "amount": round(amt), "unpaid": round(unpaid),
+                        "days": days, "bucket": bucket_for(days)})
+    return out

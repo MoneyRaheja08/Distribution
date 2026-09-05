@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 
 from ..auth import require_roles
 from ..db import db
-from ..ledger import compute
+from ..ledger import compute, bill_breakdown
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 admin = require_roles("admin")
@@ -99,3 +99,20 @@ async def sales_vs_collection(frm: str = Query(alias="from"), to: str = Query(..
     tot_sales = sum(r["sales"] for r in rows)
     tot_coll = sum(r["collected"] for r in rows)
     return {"from": frm, "to": to, "rows": rows, "total_sales": tot_sales, "total_collected": tot_coll}
+
+
+@router.get("/bill-ageing")
+async def bill_ageing(_=Depends(admin)):
+    dealers = [d async for d in db.dealers.find()]
+    bills_by, pays_by = {}, {}
+    async for b in db.bills.find():
+        bills_by.setdefault(b["dealer_id"], []).append(b)
+    async for p in db.payments.find():
+        pays_by.setdefault(p["dealer_id"], []).append(p)
+    result = []
+    for d in dealers:
+        bd = bill_breakdown(bills_by.get(d["_id"], []), pays_by.get(d["_id"], []))
+        if bd:
+            result.append({"name": d["name"], "outstanding": sum(x["unpaid"] for x in bd), "bills": bd})
+    result.sort(key=lambda r: -r["outstanding"])
+    return {"dealers": result}
