@@ -6,7 +6,7 @@ from pymongo import ReturnDocument
 from ..auth import get_current_user, require_roles
 from ..deps import current_company
 from ..db import db
-from ..models import PriceListIn, PriceListPatch, ProductBulk
+from ..models import PriceListIn, PriceListPatch, ProductBulk, ProductIn, ProductPatch
 from ..serializers import public_pricelist, public_product
 
 router = APIRouter(prefix="/pricelists", tags=["pricelists"])
@@ -81,3 +81,34 @@ async def bulk_replace(plid: str, body: ProductBulk, company=Depends(current_com
         ]
         await db.products.insert_many(docs)
     return {"ok": True, "count": len(body.products)}
+
+
+@router.post("/{plid}/products/one")
+async def add_product(plid: str, body: ProductIn, company=Depends(current_company), _=Depends(staff_only)):
+    pl = await db.pricelists.find_one({"_id": plid, "company_id": company})
+    if not pl:
+        raise HTTPException(404, "Price list not found")
+    doc = {"_id": uuid.uuid4().hex, "pricelist_id": plid, "company_id": company, "category": body.category,
+           "model": body.model, "description": body.description or "", "mrp": body.mrp, "dp": body.dp, "nlc": body.nlc}
+    await db.products.insert_one(doc)
+    return public_product(doc, include_nlc=True)
+
+
+@router.patch("/{plid}/products/{pid}")
+async def update_product(plid: str, pid: str, body: ProductPatch, company=Depends(current_company), _=Depends(staff_only)):
+    if not await db.pricelists.find_one({"_id": plid, "company_id": company}):
+        raise HTTPException(404, "Price list not found")
+    upd = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not upd:
+        raise HTTPException(400, "Nothing to update")
+    p = await db.products.find_one_and_update({"_id": pid, "pricelist_id": plid, "company_id": company},
+                                              {"$set": upd}, return_document=ReturnDocument.AFTER)
+    if not p:
+        raise HTTPException(404, "Product not found")
+    return public_product(p, include_nlc=True)
+
+
+@router.delete("/{plid}/products/{pid}")
+async def delete_product(plid: str, pid: str, company=Depends(current_company), _=Depends(staff_only)):
+    await db.products.delete_one({"_id": pid, "pricelist_id": plid, "company_id": company})
+    return {"ok": True}

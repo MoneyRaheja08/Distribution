@@ -130,6 +130,15 @@ class ProductBulk(BaseModel):
     products: list[ProductIn]
 
 
+class ProductPatch(BaseModel):
+    category: Optional[str] = None
+    model: Optional[str] = None
+    description: Optional[str] = None
+    mrp: Optional[float] = None
+    dp: Optional[float] = None
+    nlc: Optional[float] = None
+
+
 # ---- price lists (faithful, multi-sheet, any columns) ----
 class PriceSheet(BaseModel):
     name: str
@@ -198,3 +207,22 @@ class CompanyIn(BaseModel):
 
 class CompanyPatch(BaseModel):
     name: Optional[str] = None
+
+
+# ---- orders ----
+class OrderItem(BaseModel):
+    model: str
+    description: Optional[str] = ""
+    dp: float = 0
+    qty: float = Field(gt=0)
+
+
+class OrderIn(BaseModel):
+    dealer_id: str
+    pricelist_name: Optional[str] = ""
+    note: Optional[str] = ""
+    items: list[OrderItem]
+
+
+class ExecuteIn(BaseModel):
+    bill_no: Optional[str] = ""

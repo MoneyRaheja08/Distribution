@@ -105,3 +105,14 @@ def public_pricelist(pl, count=0):
 
 def public_company(c):
     return {"id": c["_id"], "name": c["name"]}
+
+
+def public_order(o):
+    return {
+        "id": o["_id"], "dealer_id": o.get("dealer_id"), "dealer_name": o.get("dealer_name"),
+        "pricelist_name": o.get("pricelist_name", ""), "note": o.get("note", ""),
+        "items": o.get("items", []), "total": o.get("total", 0),
+        "status": o.get("status", "pending"), "date": o.get("date"),
+        "created_by": o.get("created_by_name"), "created_role": o.get("created_by_role"),
+        "bill_no": o.get("bill_no"), "executed_by": o.get("executed_by"), "executed_at": o.get("executed_date"),
+    }
