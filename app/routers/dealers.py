@@ -8,7 +8,7 @@ from pymongo import ReturnDocument
 from ..auth import get_current_user, is_staff, require_roles
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, _parse, bucket_for
+from ..ledger import compute, bill_breakdown
 from ..models import BillIn, BulkBills, DealerIn, DealerPatch, SeedIn, VisitIn
 from ..serializers import public_dealer
 
@@ -60,13 +60,15 @@ async def dealer_ledger(did: str, company=Depends(current_company), user=Depends
         raise HTTPException(403, "Not your dealer")
     bills = [b async for b in db.bills.find({"dealer_id": did})]
     pays = [p async for p in db.payments.find({"dealer_id": did})]
-    today = date.today()
+    # per-bill ageing only for bills that still have an unpaid portion (FIFO, oldest cleared first)
+    unpaid_age = {}
+    for u in bill_breakdown(bills, pays):
+        unpaid_age[(u["bill_no"], u["date"])] = {"days": u["days"], "bucket": u["bucket"]}
     rows = []
     for b in bills:
-        bd = _parse(b.get("date"))
-        days = (today - bd).days if bd else None
+        info = unpaid_age.get((b.get("bill_no"), b.get("date")))
         rows.append({"date": b.get("date"), "type": "bill", "ref": b.get("bill_no"), "debit": b["amount"], "credit": 0,
-                     "days": days, "bucket": (bucket_for(days) if days is not None else None)})
+                     "days": info["days"] if info else None, "bucket": info["bucket"] if info else None})
     for p in pays:
         if p.get("status") == "bounced" or not p.get("approved", True):
             continue
