@@ -43,6 +43,7 @@ class UserIn(BaseModel):
     role: Role = Role.collector
     price_list_access: bool = False
     can_collect: bool = False
+    company_ids: list[str] = []
 
 
 class UserPatch(BaseModel):
@@ -51,6 +52,7 @@ class UserPatch(BaseModel):
     role: Optional[Role] = None
     price_list_access: Optional[bool] = None
     can_collect: Optional[bool] = None
+    company_ids: Optional[list[str]] = None
 
 
 # ---- dealers ----
@@ -187,3 +189,12 @@ class BulkBillRow(BaseModel):
 
 class BulkBills(BaseModel):
     bills: list[BulkBillRow]
+
+
+# ---- companies (multi-company) ----
+class CompanyIn(BaseModel):
+    name: str
+
+
+class CompanyPatch(BaseModel):
+    name: Optional[str] = None

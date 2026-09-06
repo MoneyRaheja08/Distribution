@@ -3,6 +3,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 
 from ..auth import require_roles
+from ..deps import current_company
 from ..db import db
 from ..ledger import compute, bill_breakdown
 
@@ -15,9 +16,9 @@ def _live(p):
 
 
 @router.get("/collections")
-async def collections_report(frm: str = Query(alias="from"), to: str = Query(...), _=Depends(admin)):
+async def collections_report(frm: str = Query(alias="from"), to: str = Query(...), company=Depends(current_company), _=Depends(admin)):
     by_mode, by_collector, total, rows = {}, {}, 0, []
-    async for p in db.payments.find({"date": {"$gte": frm, "$lte": to}}).sort("ts", -1):
+    async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}).sort("ts", -1):
         if not _live(p):
             continue
         amt = p["amount"]; total += amt
@@ -34,12 +35,12 @@ async def collections_report(frm: str = Query(alias="from"), to: str = Query(...
 
 
 @router.get("/ageing")
-async def ageing_report(_=Depends(admin)):
-    dealers = [d async for d in db.dealers.find()]
+async def ageing_report(company=Depends(current_company), _=Depends(admin)):
+    dealers = [d async for d in db.dealers.find({"company_id": company})]
     bills_by, pays_by = {}, {}
-    async for b in db.bills.find():
+    async for b in db.bills.find({"company_id": company}):
         bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for p in db.payments.find():
+    async for p in db.payments.find({"company_id": company}):
         pays_by.setdefault(p["dealer_id"], []).append(p)
     ageing = {"age_0_30": 0, "age_31_60": 0, "age_61_90": 0, "age_90p": 0}
     total = 0; rows = []; over_limit = []
@@ -65,14 +66,14 @@ async def ageing_report(_=Depends(admin)):
 
 
 @router.get("/activity")
-async def activity_report(frm: str = Query(alias="from"), to: str = Query(...), _=Depends(admin)):
+async def activity_report(frm: str = Query(alias="from"), to: str = Query(...), company=Depends(current_company), _=Depends(admin)):
     acc = {}
-    async for p in db.payments.find({"date": {"$gte": frm, "$lte": to}}):
+    async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
         if not _live(p):
             continue
         a = acc.setdefault(p.get("collector_name") or "—", {"collected": 0, "receipts": 0, "visits": 0, "dealers": set()})
         a["collected"] += p["amount"]; a["receipts"] += 1
-    async for v in db.visits.find({"date": {"$gte": frm, "$lte": to}}):
+    async for v in db.visits.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
         a = acc.setdefault(v.get("user_name") or "—", {"collected": 0, "receipts": 0, "visits": 0, "dealers": set()})
         a["visits"] += 1; a["dealers"].add(v.get("dealer_name"))
     return {"from": frm, "to": to,
@@ -82,13 +83,13 @@ async def activity_report(frm: str = Query(alias="from"), to: str = Query(...), 
 
 
 @router.get("/sales-vs-collection")
-async def sales_vs_collection(frm: str = Query(alias="from"), to: str = Query(...), _=Depends(admin)):
-    dealers = {d["_id"]: d["name"] async for d in db.dealers.find()}
+async def sales_vs_collection(frm: str = Query(alias="from"), to: str = Query(...), company=Depends(current_company), _=Depends(admin)):
+    dealers = {d["_id"]: d["name"] async for d in db.dealers.find({"company_id": company})}
     acc = {}
-    async for b in db.bills.find({"date": {"$gte": frm, "$lte": to}}):
+    async for b in db.bills.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
         a = acc.setdefault(b["dealer_id"], {"sales": 0, "collected": 0})
         a["sales"] += b.get("amount", 0)
-    async for p in db.payments.find({"date": {"$gte": frm, "$lte": to}}):
+    async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
         if not _live(p):
             continue
         a = acc.setdefault(p["dealer_id"], {"sales": 0, "collected": 0})
@@ -102,12 +103,12 @@ async def sales_vs_collection(frm: str = Query(alias="from"), to: str = Query(..
 
 
 @router.get("/bill-ageing")
-async def bill_ageing(_=Depends(admin)):
-    dealers = [d async for d in db.dealers.find()]
+async def bill_ageing(company=Depends(current_company), _=Depends(admin)):
+    dealers = [d async for d in db.dealers.find({"company_id": company})]
     bills_by, pays_by = {}, {}
-    async for b in db.bills.find():
+    async for b in db.bills.find({"company_id": company}):
         bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for p in db.payments.find():
+    async for p in db.payments.find({"company_id": company}):
         pays_by.setdefault(p["dealer_id"], []).append(p)
     result = []
     for d in dealers:

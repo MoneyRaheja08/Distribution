@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import db
-from .routers import auth, backup, bills, dealers, invoices, payments, pricelists, reports, stock, users, visits
+from .routers import auth, backup, bills, companies, dealers, invoices, payments, pricelists, reports, stock, users, visits
 
 
 @asynccontextmanager
@@ -14,6 +14,7 @@ async def lifespan(app: FastAPI):
     try:
         await db.users.create_index("name", unique=True)
         await db.dealers.create_index("collector_id")
+        await db.dealers.create_index("company_id")
         await db.payments.create_index([("collector_id", 1), ("date", 1)])
         await db.pricelists.create_index("name")
         await db.bills.create_index("dealer_id")
@@ -35,6 +36,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(companies.router)
 app.include_router(users.router)
 app.include_router(dealers.router)
 app.include_router(stock.router)

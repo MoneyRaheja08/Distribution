@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends
 
 from ..auth import require_roles
+from ..deps import current_company
 from ..db import db
 from ..models import BulkBills
 
@@ -11,9 +12,9 @@ staff_only = require_roles("admin", "manager")
 
 
 @router.post("/bulk")
-async def bulk_bills(body: BulkBills, _=Depends(require_roles("admin"))):
+async def bulk_bills(body: BulkBills, company=Depends(current_company), _=Depends(require_roles("admin"))):
     """Add many bills at once. Rows match a dealer by id, or by name (case-insensitive)."""
-    dealers = [d async for d in db.dealers.find()]
+    dealers = [d async for d in db.dealers.find({"company_id": company})]
     by_id = {d["_id"]: d for d in dealers}
     by_name = {d["name"].strip().lower(): d for d in dealers}
     existing = set()
@@ -34,7 +35,7 @@ async def bulk_bills(body: BulkBills, _=Depends(require_roles("admin"))):
             continue
         existing.add(key)
         docs.append({"_id": uuid.uuid4().hex, "dealer_id": d["_id"], "bill_no": r.bill_no,
-                     "date": r.date, "amount": r.amount, "source": "bulk"})
+                     "date": r.date, "amount": r.amount, "source": "bulk", "company_id": company})
         added += 1
     if docs:
         await db.bills.insert_many(docs)

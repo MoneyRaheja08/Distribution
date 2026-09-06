@@ -36,6 +36,7 @@ def public_user(u):
         "role": u["role"],
         "price_list_access": u.get("price_list_access", False),
         "can_collect": u.get("can_collect", False),
+        "company_ids": u.get("company_ids", []),
     }
 
 
@@ -100,3 +101,7 @@ def public_pricelist(pl, count=0):
         "allowed_user_ids": pl.get("allowed_user_ids", []),
         "count": count,
     }
+
+
+def public_company(c):
+    return {"id": c["_id"], "name": c["name"]}

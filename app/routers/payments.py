@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pymongo import ReturnDocument
 
 from ..auth import get_current_user, is_staff, require_roles
+from ..deps import current_company
 from ..db import db
 from ..ledger import compute
 from ..models import ApproveIn, ChequeUpdate, CollectIn, DepositIn, ReconcileIn
@@ -28,8 +29,8 @@ async def _summary(dealer_id):
 
 
 @router.post("")
-async def record_collection(body: CollectIn, user=Depends(get_current_user)):
-    dealer = await db.dealers.find_one({"_id": body.dealer_id})
+async def record_collection(body: CollectIn, company=Depends(current_company), user=Depends(get_current_user)):
+    dealer = await db.dealers.find_one({"_id": body.dealer_id, "company_id": company})
     if not dealer:
         raise HTTPException(404, "Dealer not found")
     if not is_staff(user) and dealer.get("collector_id") != user["_id"]:
@@ -49,7 +50,7 @@ async def record_collection(body: CollectIn, user=Depends(get_current_user)):
                "mode": body.mode.value, "cheque": (body.cheque or "").strip(), "date": date.today().isoformat(),
                "ts": datetime.now(timezone.utc), "receipt": receipt,
                "status": "pending" if pending else "cleared", "deposited": False, "approved": approved,
-               "approved_by": (user["name"] if approved else None), "reconciled": False}
+               "approved_by": (user["name"] if approved else None), "reconciled": False, "company_id": company}
     await db.payments.insert_one(payment)
     out = public_payment(payment)
     out["new_outstanding"] = (await _summary(dealer["_id"]))["outstanding"]
@@ -58,8 +59,8 @@ async def record_collection(body: CollectIn, user=Depends(get_current_user)):
 
 @router.get("")
 async def list_payments(dealer_id: Optional[str] = None, status: Optional[str] = None,
-                        day: Optional[str] = None, user=Depends(get_current_user)):
-    query = {}
+                        day: Optional[str] = None, company=Depends(current_company), user=Depends(get_current_user)):
+    query = {"company_id": company}
     if not is_staff(user):
         query["collector_id"] = user["_id"]
     if dealer_id:
@@ -91,8 +92,8 @@ async def deposit_cash(body: DepositIn, _=Depends(require_roles("admin"))):
 
 
 @router.get("/pending")
-async def pending_approvals(_=Depends(staff_only)):
-    return [public_payment(p) async for p in db.payments.find({"approved": False}).sort("ts", -1)]
+async def pending_approvals(company=Depends(current_company), _=Depends(staff_only)):
+    return [public_payment(p) async for p in db.payments.find({"approved": False, "company_id": company}).sort("ts", -1)]
 
 
 @router.patch("/{pid}/approve")
@@ -118,8 +119,8 @@ async def delete_payment(pid: str, _=Depends(require_roles("admin"))):
 
 
 @router.get("/collections")
-async def collections(reconciled: Optional[bool] = None, _=Depends(require_roles("admin"))):
-    q = {"approved": {"$ne": False}, "collector_id": {"$nin": [None, "seed"]}}
+async def collections(reconciled: Optional[bool] = None, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    q = {"approved": {"$ne": False}, "collector_id": {"$nin": [None, "seed"]}, "company_id": company}
     if reconciled is True:
         q["reconciled"] = True
     elif reconciled is False:
@@ -136,12 +137,12 @@ async def reconcile_payment(pid: str, body: ReconcileIn, _=Depends(require_roles
 
 
 @router.get("/summary")
-async def dashboard(_=Depends(staff_only)):
-    dealers = [d async for d in db.dealers.find()]
+async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
+    dealers = [d async for d in db.dealers.find({"company_id": company})]
     bills_by, pays_by = {}, {}
-    async for b in db.bills.find():
+    async for b in db.bills.find({"company_id": company}):
         bills_by.setdefault(b["dealer_id"], []).append(b)
-    all_pays = [p async for p in db.payments.find()]
+    all_pays = [p async for p in db.payments.find({"company_id": company})]
     for p in all_pays:
         pays_by.setdefault(p["dealer_id"], []).append(p)
     today_d = date.today()
@@ -161,6 +162,7 @@ async def dashboard(_=Depends(staff_only)):
                            if p["mode"] == "Cash" and not p.get("deposited") and p["status"] == "cleared")
     cheques_pending = sum(p["amount"] for p in field_pays if p["status"] == "pending")
     users = [u async for u in db.users.find({"role": "collector"})]
+    users = [u for u in users if company in (u.get("company_ids") or [])] or users
     per_collector = []
     for u in users:
         got = sum(p["amount"] for p in field_pays
