@@ -6,7 +6,7 @@ from pymongo import ReturnDocument
 from ..auth import get_current_user, require_roles
 from ..deps import current_company
 from ..db import db
-from ..models import PriceListIn, PriceListPatch, ProductBulk, ProductIn, ProductPatch
+from ..models import PriceListIn, PriceListPatch, ProductBulk, ProductIn, ProductPatch, FlexImport, CellRow
 from ..serializers import public_pricelist, public_product
 
 router = APIRouter(prefix="/pricelists", tags=["pricelists"])
@@ -41,6 +41,12 @@ async def update_pricelist(plid: str, body: PriceListPatch, company=Depends(curr
         upd["name"] = body.name.strip()
     if body.allowed_user_ids is not None:
         upd["allowed_user_ids"] = body.allowed_user_ids
+    if body.columns is not None:
+        upd["columns"] = body.columns
+    if body.model_col is not None:
+        upd["model_col"] = body.model_col
+    if body.price_col is not None:
+        upd["price_col"] = body.price_col
     if not upd:
         raise HTTPException(400, "Nothing to update")
     pl = await db.pricelists.find_one_and_update({"_id": plid, "company_id": company}, {"$set": upd}, return_document=ReturnDocument.AFTER)
@@ -64,7 +70,7 @@ async def list_products(plid: str, company=Depends(current_company), user=Depend
         raise HTTPException(404, "Price list not found")
     if not can_access(user, pl):
         raise HTTPException(403, "You do not have access to this price list")
-    return [public_product(p, include_nlc=True) async for p in db.products.find({"pricelist_id": plid}).sort("model", 1)]
+    return [public_product(p) async for p in db.products.find({"pricelist_id": plid})]
 
 
 @router.post("/{plid}/products/bulk")
@@ -84,31 +90,53 @@ async def bulk_replace(plid: str, body: ProductBulk, company=Depends(current_com
 
 
 @router.post("/{plid}/products/one")
-async def add_product(plid: str, body: ProductIn, company=Depends(current_company), _=Depends(staff_only)):
+async def add_product(plid: str, body: CellRow, company=Depends(current_company), _=Depends(staff_only)):
     pl = await db.pricelists.find_one({"_id": plid, "company_id": company})
     if not pl:
         raise HTTPException(404, "Price list not found")
-    doc = {"_id": uuid.uuid4().hex, "pricelist_id": plid, "company_id": company, "category": body.category,
-           "model": body.model, "description": body.description or "", "mrp": body.mrp, "dp": body.dp, "nlc": body.nlc}
+    doc = {"_id": uuid.uuid4().hex, "pricelist_id": plid, "company_id": company, "cells": body.cells}
     await db.products.insert_one(doc)
-    return public_product(doc, include_nlc=True)
+    return public_product(doc)
 
 
 @router.patch("/{plid}/products/{pid}")
-async def update_product(plid: str, pid: str, body: ProductPatch, company=Depends(current_company), _=Depends(staff_only)):
+async def update_product(plid: str, pid: str, body: CellRow, company=Depends(current_company), _=Depends(staff_only)):
     if not await db.pricelists.find_one({"_id": plid, "company_id": company}):
         raise HTTPException(404, "Price list not found")
-    upd = {k: v for k, v in body.model_dump(exclude_none=True).items()}
-    if not upd:
-        raise HTTPException(400, "Nothing to update")
     p = await db.products.find_one_and_update({"_id": pid, "pricelist_id": plid, "company_id": company},
-                                              {"$set": upd}, return_document=ReturnDocument.AFTER)
+                                              {"$set": {"cells": body.cells}}, return_document=ReturnDocument.AFTER)
     if not p:
         raise HTTPException(404, "Product not found")
-    return public_product(p, include_nlc=True)
+    return public_product(p)
 
 
 @router.delete("/{plid}/products/{pid}")
 async def delete_product(plid: str, pid: str, company=Depends(current_company), _=Depends(staff_only)):
     await db.products.delete_one({"_id": pid, "pricelist_id": plid, "company_id": company})
+    return {"ok": True}
+
+
+@router.post("/{plid}/import")
+async def flex_import(plid: str, body: FlexImport, company=Depends(current_company), _=Depends(staff_only)):
+    """Import a price list keeping ALL columns. Rows are stored as free-form cells."""
+    pl = await db.pricelists.find_one({"_id": plid, "company_id": company})
+    if not pl:
+        raise HTTPException(404, "Price list not found")
+    await db.pricelists.update_one({"_id": plid}, {"$set": {
+        "columns": body.columns, "model_col": body.model_col, "price_col": body.price_col}})
+    await db.products.delete_many({"pricelist_id": plid})
+    if body.rows:
+        docs = [{"_id": uuid.uuid4().hex, "pricelist_id": plid, "company_id": company, "cells": r} for r in body.rows]
+        await db.products.insert_many(docs)
+    return {"ok": True, "count": len(body.rows)}
+
+
+@router.delete("/{plid}/columns/{col}")
+async def delete_column(plid: str, col: str, company=Depends(current_company), _=Depends(staff_only)):
+    pl = await db.pricelists.find_one({"_id": plid, "company_id": company})
+    if not pl:
+        raise HTTPException(404, "Price list not found")
+    cols = [c for c in (pl.get("columns") or []) if c != col]
+    await db.pricelists.update_one({"_id": plid}, {"$set": {"columns": cols}})
+    await db.products.update_many({"pricelist_id": plid}, {"$unset": {f"cells.{col}": ""}})
     return {"ok": True}

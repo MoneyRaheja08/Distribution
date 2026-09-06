@@ -80,19 +80,15 @@ def public_payment(p):
     }
 
 
-def public_product(p, include_nlc=False):
-    d = {
-        "id": p["_id"],
-        "category": p.get("category"),
-        "model": p.get("model"),
-        "description": p.get("description", ""),
-        "mrp": p.get("mrp"),
-        "dp": p.get("dp"),
-    }
-    if include_nlc:
-        d["nlc"] = p.get("nlc")
-    return d
+def public_product(p, include_nlc=True):
+    cells = p.get("cells")
+    if cells is None:
+        cells = {"Category": p.get("category"), "Model": p.get("model"),
+                 "MRP": p.get("mrp"), "DP": p.get("dp"), "NLC": p.get("nlc")}
+    return {"id": p["_id"], "cells": cells}
 
+
+DEFAULT_COLUMNS = ["Category", "Model", "MRP", "DP", "NLC"]
 
 def public_pricelist(pl, count=0):
     return {
@@ -100,6 +96,9 @@ def public_pricelist(pl, count=0):
         "name": pl["name"],
         "allowed_user_ids": pl.get("allowed_user_ids", []),
         "count": count,
+        "columns": pl.get("columns") or DEFAULT_COLUMNS,
+        "model_col": pl.get("model_col") or "Model",
+        "price_col": pl.get("price_col") or "DP",
     }
 
 

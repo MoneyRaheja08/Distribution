@@ -139,6 +139,17 @@ class ProductPatch(BaseModel):
     nlc: Optional[float] = None
 
 
+class FlexImport(BaseModel):
+    columns: list[str]
+    model_col: Optional[str] = None
+    price_col: Optional[str] = None
+    rows: list[dict]
+
+
+class CellRow(BaseModel):
+    cells: dict
+
+
 # ---- price lists (faithful, multi-sheet, any columns) ----
 class PriceSheet(BaseModel):
     name: str
@@ -166,6 +177,9 @@ class PriceListIn(BaseModel):
 class PriceListPatch(BaseModel):
     name: Optional[str] = None
     allowed_user_ids: Optional[list[str]] = None
+    columns: Optional[list[str]] = None
+    model_col: Optional[str] = None
+    price_col: Optional[str] = None
 
 
 # ---- bills / ledger ----
