@@ -22,5 +22,6 @@ async def visits_today(_=Depends(staff_only)):
     out = []
     async for v in db.visits.find({"date": today}).sort("first_ts", 1):
         out.append({"dealer_name": v.get("dealer_name"), "user_name": v.get("user_name"),
-                    "role": v.get("role"), "time": _ist(v.get("first_ts"))})
+                    "role": v.get("role"), "time": _ist(v.get("first_ts")),
+                    "lat": v.get("lat"), "lng": v.get("lng")})
     return out

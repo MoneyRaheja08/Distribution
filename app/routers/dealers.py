@@ -2,13 +2,13 @@ import re
 import uuid
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pymongo import ReturnDocument
 
 from ..auth import get_current_user, is_staff, require_roles
 from ..db import db
 from ..ledger import compute
-from ..models import BillIn, BulkBills, DealerIn, DealerPatch, SeedIn
+from ..models import BillIn, BulkBills, DealerIn, DealerPatch, SeedIn, VisitIn
 from ..serializers import public_dealer
 
 router = APIRouter(prefix="/dealers", tags=["dealers"])
@@ -152,7 +152,7 @@ async def seed_ledger(did: str, body: SeedIn, _=Depends(require_roles("admin")))
 
 
 @router.post("/{did}/visit")
-async def mark_visited(did: str, user=Depends(get_current_user)):
+async def mark_visited(did: str, body: VisitIn = Body(default=VisitIn()), user=Depends(get_current_user)):
     d = await db.dealers.find_one({"_id": did})
     if not d:
         raise HTTPException(404, "Dealer not found")
@@ -160,11 +160,14 @@ async def mark_visited(did: str, user=Depends(get_current_user)):
         raise HTTPException(403, "Not your dealer")
     today = date.today().isoformat()
     now = datetime.now(timezone.utc)
+    insert = {"_id": uuid.uuid4().hex, "dealer_id": did, "dealer_name": d["name"],
+              "user_id": user["_id"], "user_name": user["name"], "role": user["role"],
+              "date": today, "first_ts": now}
+    if body and body.lat is not None and body.lng is not None:
+        insert["lat"] = body.lat
+        insert["lng"] = body.lng
     await db.visits.update_one(
         {"dealer_id": did, "user_id": user["_id"], "date": today},
-        {"$setOnInsert": {"_id": uuid.uuid4().hex, "dealer_id": did, "dealer_name": d["name"],
-                          "user_id": user["_id"], "user_name": user["name"], "role": user["role"],
-                          "date": today, "first_ts": now},
-         "$set": {"last_ts": now}},
+        {"$setOnInsert": insert, "$set": {"last_ts": now}},
         upsert=True)
     return {"ok": True}

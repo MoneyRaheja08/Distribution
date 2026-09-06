@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -144,12 +144,16 @@ async def dashboard(_=Depends(staff_only)):
     all_pays = [p async for p in db.payments.find()]
     for p in all_pays:
         pays_by.setdefault(p["dealer_id"], []).append(p)
-    today = date.today().isoformat()
+    today_d = date.today()
+    today = today_d.isoformat()
     total_out = over90 = 0
+    overdue_rows = []
     for d in dealers:
         s = compute(bills_by.get(d["_id"], []), pays_by.get(d["_id"], []))
         total_out += s["outstanding"]
         over90 += s["ageing"].get("age_90p", 0)
+        if s["outstanding"] > 0:
+            overdue_rows.append({"name": d["name"], "outstanding": s["outstanding"], "age_90p": s["ageing"].get("age_90p", 0)})
     field_pays = [p for p in all_pays if p.get("collector_id") not in (None, "seed") and p.get("approved", True)]
     pending_count = sum(1 for p in all_pays if p.get("approved") is False)
     collected_today = sum(p["amount"] for p in field_pays if p["date"] == today and p["status"] != "bounced")
@@ -163,6 +167,16 @@ async def dashboard(_=Depends(staff_only)):
                   if p["collector_id"] == u["_id"] and p["date"] == today and p["status"] != "bounced")
         assigned = sum(1 for d in dealers if d.get("collector_id") == u["_id"])
         per_collector.append({"id": u["_id"], "name": u["name"], "dealers": assigned, "collected_today": got})
+    week_start = (today_d - timedelta(days=6)).isoformat()
+    month_start = today_d.replace(day=1).isoformat()
+    collected_week = sum(p["amount"] for p in field_pays if p["date"] >= week_start and p["status"] != "bounced")
+    collected_month = sum(p["amount"] for p in field_pays if p["date"] >= month_start and p["status"] != "bounced")
+    daily = []
+    for i in range(13, -1, -1):
+        dd = (today_d - timedelta(days=i)).isoformat()
+        daily.append({"date": dd, "amount": sum(p["amount"] for p in field_pays if p["date"] == dd and p["status"] != "bounced")})
+    top_overdue = sorted(overdue_rows, key=lambda r: (-r["age_90p"], -r["outstanding"]))[:5]
     return {"total_outstanding": total_out, "over_90_days": over90, "collected_today": collected_today,
-            "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending,
+            "collected_week": collected_week, "collected_month": collected_month, "daily": daily,
+            "top_overdue": top_overdue, "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending,
             "pending_approvals": pending_count, "per_collector": per_collector}

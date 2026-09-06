@@ -109,6 +109,11 @@ class ReconcileIn(BaseModel):
     reconciled: bool
 
 
+class VisitIn(BaseModel):
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+
 # ---- products / price list ----
 class ProductIn(BaseModel):
     category: str
