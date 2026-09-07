@@ -8,7 +8,7 @@ from pymongo import ReturnDocument
 from ..auth import get_current_user, is_staff, require_roles
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute
+from ..ledger import compute, bill_breakdown
 from ..models import ApproveIn, ChequeUpdate, CollectIn, DepositIn, ReconcileIn
 from ..serializers import public_payment
 
@@ -148,13 +148,19 @@ async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
     today_d = date.today()
     today = today_d.isoformat()
     total_out = over90 = 0
+    ageing_total = {"age_0_30": 0, "age_31_60": 0, "age_61_90": 0, "age_90p": 0}
     overdue_rows = []
     for d in dealers:
-        s = compute(bills_by.get(d["_id"], []), pays_by.get(d["_id"], []))
+        bl = bills_by.get(d["_id"], []); pz = pays_by.get(d["_id"], [])
+        s = compute(bl, pz)
         total_out += s["outstanding"]
         over90 += s["ageing"].get("age_90p", 0)
+        for k in ageing_total:
+            ageing_total[k] += s["ageing"].get(k, 0)
         if s["outstanding"] > 0:
-            overdue_rows.append({"name": d["name"], "outstanding": s["outstanding"], "age_90p": s["ageing"].get("age_90p", 0)})
+            oldest = max((b["days"] for b in bill_breakdown(bl, pz)), default=0)
+            overdue_rows.append({"name": d["name"], "area": d.get("area"), "outstanding": s["outstanding"],
+                                 "age_90p": s["ageing"].get("age_90p", 0), "oldest_due": oldest})
     field_pays = [p for p in all_pays if p.get("collector_id") not in (None, "seed") and p.get("approved", True)]
     pending_count = sum(1 for p in all_pays if p.get("approved") is False)
     collected_today = sum(p["amount"] for p in field_pays if p["date"] == today and p["status"] != "bounced")
@@ -177,8 +183,8 @@ async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
     for i in range(13, -1, -1):
         dd = (today_d - timedelta(days=i)).isoformat()
         daily.append({"date": dd, "amount": sum(p["amount"] for p in field_pays if p["date"] == dd and p["status"] != "bounced")})
-    top_overdue = sorted(overdue_rows, key=lambda r: (-r["age_90p"], -r["outstanding"]))[:5]
+    top_overdue = sorted(overdue_rows, key=lambda r: (-r["oldest_due"], -r["outstanding"]))[:8]
     return {"total_outstanding": total_out, "over_90_days": over90, "collected_today": collected_today,
             "collected_week": collected_week, "collected_month": collected_month, "daily": daily,
-            "top_overdue": top_overdue, "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending,
+            "top_overdue": top_overdue, "ageing": ageing_total, "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending,
             "pending_approvals": pending_count, "per_collector": per_collector}
