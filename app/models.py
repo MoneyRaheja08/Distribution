@@ -43,6 +43,7 @@ class UserIn(BaseModel):
     role: Role = Role.collector
     price_list_access: bool = False
     can_collect: bool = False
+    can_import_statement: bool = False
     company_ids: list[str] = []
 
 
@@ -52,6 +53,7 @@ class UserPatch(BaseModel):
     role: Optional[Role] = None
     price_list_access: Optional[bool] = None
     can_collect: Optional[bool] = None
+    can_import_statement: Optional[bool] = None
     company_ids: Optional[list[str]] = None
 
 

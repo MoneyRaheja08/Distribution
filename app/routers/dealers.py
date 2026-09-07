@@ -135,10 +135,16 @@ async def add_bill(did: str, body: BillIn, company=Depends(current_company), _=D
 
 
 @router.post("/{did}/seed")
-async def seed_ledger(did: str, body: SeedIn, company=Depends(current_company), _=Depends(require_roles("admin"))):
-    """Replace a dealer's whole ledger from an imported statement (one-time seed)."""
+async def seed_ledger(did: str, body: SeedIn, company=Depends(current_company), user=Depends(get_current_user)):
+    """Seed a dealer's ledger from an imported statement. Admin: anytime.
+    Manager (if allowed): only once, while the ledger is still empty."""
     if not await db.dealers.find_one({"_id": did, "company_id": company}):
         raise HTTPException(404, "Dealer not found")
+    if user["role"] != "admin":
+        if user["role"] != "manager" or not user.get("can_import_statement"):
+            raise HTTPException(403, "You are not allowed to import statements")
+        if await db.bills.count_documents({"dealer_id": did, "company_id": company}) > 0:
+            raise HTTPException(403, "Statement already imported for this dealer — ask an admin to re-import")
     await db.bills.delete_many({"dealer_id": did})
     await db.payments.delete_many({"dealer_id": did})
     docs = []

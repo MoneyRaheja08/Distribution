@@ -37,7 +37,7 @@ async def create_user(body: UserIn, _=Depends(admin_only)):
     uid = uuid.uuid4().hex
     u = {"_id": uid, "name": body.name.strip(), "pin_hash": hash_pin(body.pin),
          "role": body.role.value, "price_list_access": body.price_list_access,
-         "can_collect": body.can_collect, "company_ids": body.company_ids}
+         "can_collect": body.can_collect, "can_import_statement": body.can_import_statement, "company_ids": body.company_ids}
     await db.users.insert_one(u)
     return public_user(u)
 
@@ -55,6 +55,8 @@ async def update_user(uid: str, body: UserPatch, _=Depends(admin_only)):
         upd["price_list_access"] = body.price_list_access
     if body.can_collect is not None:
         upd["can_collect"] = body.can_collect
+    if body.can_import_statement is not None:
+        upd["can_import_statement"] = body.can_import_statement
     if body.company_ids is not None:
         upd["company_ids"] = body.company_ids
     if not upd:
