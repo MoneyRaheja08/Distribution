@@ -2,13 +2,19 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 
-from ..auth import require_roles
+from fastapi import HTTPException
+from ..auth import get_current_user, require_roles
 from ..deps import current_company
 from ..db import db
 from ..ledger import compute, bill_breakdown
 
 router = APIRouter(prefix="/reports", tags=["reports"])
-admin = require_roles("admin")
+
+
+async def admin(user=Depends(get_current_user)):
+    if user["role"] == "admin" or user.get("can_view_reports"):
+        return user
+    raise HTTPException(403, "You do not have reports access")
 
 
 def _live(p):

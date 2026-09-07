@@ -37,6 +37,7 @@ def public_user(u):
         "price_list_access": u.get("price_list_access", False),
         "can_collect": u.get("can_collect", False),
         "can_import_statement": u.get("can_import_statement", False),
+        "can_view_reports": u.get("can_view_reports", False),
         "company_ids": u.get("company_ids", []),
     }
 
