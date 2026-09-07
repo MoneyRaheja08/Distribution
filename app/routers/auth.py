@@ -1,8 +1,8 @@
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
-from ..auth import create_token, hash_pin, verify_pin
+from ..auth import create_token, get_current_user, hash_pin, verify_pin
 from ..db import db
 from ..models import BootstrapIn, LoginIn
 from ..serializers import public_user
@@ -31,3 +31,8 @@ async def login(body: LoginIn):
         "token_type": "bearer",
         "user": public_user(user),
     }
+
+
+@router.get("/me")
+async def me(user=Depends(get_current_user)):
+    return {"user": public_user(user)}
