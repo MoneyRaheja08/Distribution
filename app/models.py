@@ -161,17 +161,6 @@ class PriceSheet(BaseModel):
     rows: list[list]
 
 
-class PriceListIn(BaseModel):
-    name: str
-    allowed_users: list[str] = []
-    sheets: list[PriceSheet]
-
-
-class PriceListPatch(BaseModel):
-    name: Optional[str] = None
-    allowed_users: Optional[list[str]] = None
-
-
 # ---- price lists (multi-brand) ----
 class PriceListIn(BaseModel):
     name: str
@@ -191,6 +180,7 @@ class BillIn(BaseModel):
     bill_no: str
     date: str          # YYYY-MM-DD
     amount: float = Field(gt=0)
+    source: Optional[str] = None   # 'manual' (default) or 'pdf'
 
 
 class SeedPayment(BaseModel):

@@ -130,7 +130,7 @@ async def add_bill(did: str, body: BillIn, company=Depends(current_company), _=D
     if dupe:
         raise HTTPException(409, f"Bill {body.bill_no.strip()} already exists for this dealer")
     await db.bills.insert_one({"_id": uuid.uuid4().hex, "dealer_id": did, "bill_no": body.bill_no.strip(),
-                               "date": body.date, "amount": body.amount, "source": "manual", "company_id": company})
+                               "date": body.date, "amount": body.amount, "source": (body.source or "manual"), "company_id": company})
     return {"ok": True, "summary": await _summary(did)}
 
 

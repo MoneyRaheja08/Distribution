@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
@@ -123,3 +124,18 @@ async def bill_ageing(company=Depends(current_company), _=Depends(admin)):
             result.append({"name": d["name"], "outstanding": sum(x["unpaid"] for x in bd), "bills": bd})
     result.sort(key=lambda r: -r["outstanding"])
     return {"dealers": result}
+
+
+@router.get("/bills")
+async def bills_report(frm: str = Query(alias="from"), to: str = Query(...), source: Optional[str] = None,
+                       company=Depends(current_company), _=Depends(admin)):
+    dealers = {d["_id"]: d["name"] async for d in db.dealers.find({"company_id": company})}
+    q = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
+    if source:
+        q["source"] = source
+    rows, total = [], 0
+    async for b in db.bills.find(q).sort("date", -1):
+        amt = b.get("amount", 0); total += amt
+        rows.append({"dealer": dealers.get(b["dealer_id"], "?"), "bill_no": b.get("bill_no"),
+                     "date": b.get("date"), "amount": round(amt), "source": b.get("source")})
+    return {"from": frm, "to": to, "source": source, "total": round(total), "rows": rows}
