@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: ashoka-distribution-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: MONGO_URI
+        sync: false
+      - key: DB_NAME
+        value: ashoka_distribution
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRE_MINUTES
+        value: "10080"
+      - key: CORS_ORIGINS
+        sync: false
+      - key: TZ
+        value: Asia/Kolkata
