@@ -149,7 +149,7 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
     if brand:
         query["brand"] = brand.upper()
     rx = _re.compile(_re.escape(q), _re.I) if q else None
-    rows, total, units, by_dealer = [], 0.0, 0, {}
+    rows, total, units, by_dealer, by_model = [], 0.0, 0, {}, {}
     async for s in db.sales.find(query).sort("date", -1):
         if rx and not (rx.search(s.get("model") or "") or rx.search(s.get("dealer_name") or "") or rx.search(s.get("imei") or "")):
             continue
@@ -161,9 +161,13 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
                      "imei": s.get("imei"), "qty": s.get("qty", 0), "rate": round(s.get("rate", 0)), "amount": round(amt)})
         d = by_dealer.setdefault(s.get("dealer_name") or "—", {"amount": 0, "qty": 0})
         d["amount"] += amt; d["qty"] += s.get("qty", 0) or 1
+        m = by_model.setdefault(s.get("model") or "—", {"model": s.get("model") or "—", "brand": s.get("brand"), "amount": 0, "qty": 0})
+        m["amount"] += amt; m["qty"] += s.get("qty", 0) or 1
     return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:1000],
             "by_dealer": [{"dealer": k, "amount": round(v["amount"]), "qty": v["qty"]}
-                          for k, v in sorted(by_dealer.items(), key=lambda x: -x[1]["amount"])]}
+                          for k, v in sorted(by_dealer.items(), key=lambda x: -x[1]["amount"])],
+            "by_model": [{"model": v["model"], "brand": v["brand"], "amount": round(v["amount"]), "qty": v["qty"]}
+                         for v in sorted(by_model.values(), key=lambda x: -x["qty"])][:20]}
 
 
 @router.get("/purchases-brand")
@@ -183,3 +187,23 @@ async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query
             "by_brand": [{"brand": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_brand.items(), key=lambda x: -x[1]["amount"])],
             "by_month": [{"month": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_month.items())],
             "by_category": [{"group": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_cat.items(), key=lambda x: -x[1]["amount"])]}
+
+
+@router.get("/profit")
+async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
+                        company=Depends(current_company), _=Depends(admin)):
+    query = {"company_id": company, "status": "sold", "sale_date": {"$gte": frm, "$lte": to}}
+    if brand:
+        query["brand"] = brand.upper()
+    by_model, tot_sale, tot_cost, units = {}, 0.0, 0.0, 0
+    async for u in db.stock_units.find(query):
+        sr = u.get("sale_rate") or 0
+        pr = u.get("purchase_rate") or 0
+        units += 1; tot_sale += sr; tot_cost += pr
+        m = by_model.setdefault(u.get("model") or "—", {"model": u.get("model") or "—", "brand": u.get("brand"), "qty": 0, "sale": 0, "cost": 0})
+        m["qty"] += 1; m["sale"] += sr; m["cost"] += pr
+    rows = [{"model": v["model"], "brand": v["brand"], "qty": v["qty"], "sale": round(v["sale"]),
+             "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])} for v in by_model.values()]
+    rows.sort(key=lambda x: -x["margin"])
+    return {"from": frm, "to": to, "units": units, "total_sale": round(tot_sale), "total_cost": round(tot_cost),
+            "total_margin": round(tot_sale - tot_cost), "rows": rows}

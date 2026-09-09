@@ -2,7 +2,7 @@ import csv
 import io
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
@@ -127,10 +127,17 @@ async def sale_preview(file: UploadFile = File(...), company=Depends(current_com
             matched += 1
             matched_total += g["total"]
     out.sort(key=lambda x: x["bill_no"])
+    sale_imeis = [l["imei"] for l in lines if l["imei"]]
+    known = set()
+    if sale_imeis:
+        async for u in db.stock_units.find({"company_id": company, "imei": {"$in": sale_imeis}}, {"imei": 1}):
+            known.add(u["imei"])
+    unknown = [i for i in sale_imeis if i not in known]
     return {"brand": lines[0]["brand"] if lines else "", "bills": out,
             "summary": {"total_bills": len(out), "matched": matched, "unmatched": unmatched,
                         "duplicates": dup, "matched_total": round(matched_total, 2),
-                        "total_units": sum(1 for l in lines if l["imei"]), "total_lines": len(lines)}}
+                        "total_units": sum(1 for l in lines if l["imei"]), "total_lines": len(lines),
+                        "unknown_serials": len(unknown), "unknown_sample": unknown[:8]}}
 
 
 @router.post("/import/sale/commit")
@@ -304,4 +311,31 @@ async def stock_summary(company=Depends(current_company), _=Depends(get_current_
                      "total": l.get("in_qty", 0), "available": l.get("in_qty", 0) - l.get("sold_qty", 0),
                      "tracked": "qty"})
     rows.sort(key=lambda x: (x["brand"] or "", x["model"] or ""))
-    return {"rows": rows, "brands": sorted({r["brand"] for r in rows if r["brand"]})}
+    val = {}
+    async for u in db.stock_units.find({"company_id": company, "status": "in_stock"}):
+        v = val.setdefault(u.get("brand") or "—", {"brand": u.get("brand") or "—", "units": 0, "value": 0.0})
+        v["units"] += 1
+        v["value"] += (u.get("purchase_rate") or 0)
+    valuation = [{"brand": x["brand"], "units": x["units"], "value": round(x["value"])}
+                 for x in sorted(val.values(), key=lambda x: -x["value"])]
+    return {"rows": rows, "brands": sorted({r["brand"] for r in rows if r["brand"]}),
+            "valuation": valuation, "total_value": round(sum(x["value"] for x in val.values()))}
+
+
+@router.get("/catalog/aging-stock")
+async def aging_stock(days: int = 60, company=Depends(current_company), _=Depends(get_current_user)):
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    today = date.today()
+    rows = []
+    async for u in db.stock_units.find({"company_id": company, "status": "in_stock",
+                                        "purchase_date": {"$lte": cutoff, "$ne": None}}).limit(500):
+        pd = u.get("purchase_date")
+        try:
+            y, m, d = pd.split("-")
+            age = (today - date(int(y), int(m), int(d))).days
+        except Exception:
+            age = None
+        rows.append({"imei": u.get("imei"), "model": u.get("model"), "brand": u.get("brand"),
+                     "purchase_date": pd, "days": age, "purchase_rate": round(u.get("purchase_rate") or 0)})
+    rows.sort(key=lambda x: -(x["days"] or 0))
+    return {"days": days, "count": len(rows), "value": round(sum(r["purchase_rate"] for r in rows)), "rows": rows}
