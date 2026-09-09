@@ -1,8 +1,8 @@
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
-from ..auth import require_roles
+from ..auth import get_current_user, require_roles
 from ..deps import current_company
 from ..db import db
 from ..models import BulkBills
@@ -40,3 +40,40 @@ async def bulk_bills(body: BulkBills, company=Depends(current_company), _=Depend
     if docs:
         await db.bills.insert_many(docs)
     return {"ok": True, "added": added, "unmatched": unmatched, "duplicates": duplicates}
+
+
+@router.get("/{bid}")
+async def bill_detail(bid: str, company=Depends(current_company), _=Depends(get_current_user)):
+    """Return a bill plus its imported line items (if it came from a Sale CSV import)."""
+    b = await db.bills.find_one({"_id": bid, "company_id": company})
+    if not b:
+        raise HTTPException(404, "Bill not found")
+    lines = []
+    async for s in db.sales.find({"company_id": company, "dealer_id": b["dealer_id"], "bill_no": b.get("bill_no")}):
+        lines.append({"model": s.get("model"), "group": s.get("group"), "brand": s.get("brand"),
+                      "qty": s.get("qty"), "rate": s.get("rate"), "amount": s.get("amount"), "imei": s.get("imei")})
+    return {"bill_no": b.get("bill_no"), "date": b.get("date"), "amount": b.get("amount"),
+            "source": b.get("source"), "lines": lines,
+            "line_total": round(sum(l["amount"] or 0 for l in lines), 2)}
+
+
+@router.delete("/{bid}")
+async def delete_bill(bid: str, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    """Admin: delete a bill (from PDF, import, statement or manual). Sale-CSV bills also
+    return their sold stock to inventory and drop the linked sale lines."""
+    b = await db.bills.find_one({"_id": bid, "company_id": company})
+    if not b:
+        raise HTTPException(404, "Bill not found")
+    await db.bills.delete_one({"_id": bid, "company_id": company})
+    reverted = 0
+    if b.get("source") == "sale_csv" and b.get("bill_no"):
+        async for u in db.stock_units.find({"company_id": company, "sale_bill": b["bill_no"],
+                                            "sale_dealer_id": b["dealer_id"]}):
+            await db.stock_units.update_one(
+                {"_id": u["_id"]},
+                {"$set": {"status": "in_stock"},
+                 "$unset": {"sale_bill": "", "sale_dealer_id": "", "sale_dealer_name": "",
+                            "sale_rate": "", "sale_date": ""}})
+            reverted += 1
+        await db.sales.delete_many({"company_id": company, "dealer_id": b["dealer_id"], "bill_no": b["bill_no"]})
+    return {"ok": True, "reverted_units": reverted}

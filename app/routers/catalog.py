@@ -165,19 +165,34 @@ async def sale_preview(file: UploadFile = File(...), date_format: str = "auto",
         g["lines"] += 1
         if ln["imei"]:
             g["units"] += 1
-    out, matched, unmatched, dup, matched_total = [], 0, 0, 0, 0.0
+    out, matched, to_create, unmatched, dup, will_post, post_total = [], 0, 0, 0, 0, 0, 0.0
+    new_keys = set()
     for g in groups.values():
         d = _match_dealer(by_name, by_phone, g["party"], g.get("mobile"))
-        is_dup = d is not None and (d["_id"], g["bill_no"].strip().lower()) in existing
-        out.append({**g, "total": round(g["total"], 2), "matched": d is not None,
-                    "dealer": d["name"] if d else None, "duplicate": is_dup})
-        if d is None:
-            unmatched += 1
-        elif is_dup:
-            dup += 1
+        row = {**g, "total": round(g["total"], 2)}
+        if d is not None:
+            is_dup = (d["_id"], g["bill_no"].strip().lower()) in existing
+            row.update({"matched": True, "new_dealer": False, "dealer": d["name"], "duplicate": is_dup})
+            if is_dup:
+                dup += 1
+            else:
+                matched += 1
+                will_post += 1
+                post_total += g["total"]
         else:
-            matched += 1
-            matched_total += g["total"]
+            party = (g["party"] or "").strip()
+            if party:
+                key = party.lower() + "|" + _ph(g.get("mobile"))
+                if key not in new_keys:
+                    new_keys.add(key)
+                    to_create += 1
+                row.update({"matched": False, "new_dealer": True, "dealer": party, "duplicate": False})
+                will_post += 1
+                post_total += g["total"]
+            else:
+                unmatched += 1
+                row.update({"matched": False, "new_dealer": False, "dealer": None, "duplicate": False})
+        out.append(row)
     out.sort(key=lambda x: x["bill_no"])
     sale_imeis = [l["imei"] for l in lines if l["imei"]]
     known = set()
@@ -187,8 +202,9 @@ async def sale_preview(file: UploadFile = File(...), date_format: str = "auto",
     unknown = [i for i in sale_imeis if i not in known]
     return {"brand": lines[0]["brand"] if lines else "", "bills": out,
             "date_info": _date_info(lines),
-            "summary": {"total_bills": len(out), "matched": matched, "unmatched": unmatched,
-                        "duplicates": dup, "matched_total": round(matched_total, 2),
+            "summary": {"total_bills": len(out), "matched": matched, "to_create": to_create,
+                        "will_post": will_post, "unmatched": unmatched, "duplicates": dup,
+                        "matched_total": round(post_total, 2),
                         "total_units": sum(1 for l in lines if l["imei"]), "total_lines": len(lines),
                         "unknown_serials": len(unknown), "unknown_sample": unknown[:8]}}
 
@@ -208,10 +224,31 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
     groups = {}
     for ln in lines:
         groups.setdefault(ln["bill_no"], []).append(ln)
+
+    dealers_created = 0
+
+    async def _ensure_dealer(party, mobile):
+        nonlocal dealers_created
+        d = _match_dealer(by_name, by_phone, party, mobile)
+        if d:
+            return d
+        party = (party or "").strip()
+        if not party:
+            return None
+        ph = _ph(mobile)
+        doc = {"_id": uuid.uuid4().hex, "name": party, "area": None, "phone": (mobile or "").strip() or None,
+               "credit_limit": 0, "collector_id": None, "company_id": company, "source": "sale_csv"}
+        await db.dealers.insert_one(doc)
+        by_name[party.lower()] = doc
+        if ph:
+            by_phone[ph] = doc
+        dealers_created += 1
+        return doc
+
     bills_added = skipped_unmatched = skipped_dup = 0
     bill_docs = []
     for bill_no, glines in groups.items():
-        d = _match_dealer(by_name, by_phone, glines[0]["party"], glines[0].get("mobile"))
+        d = await _ensure_dealer(glines[0]["party"], glines[0].get("mobile"))
         if not d:
             skipped_unmatched += 1
             continue
@@ -256,9 +293,9 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
             qty_sold += ln["qty"]
     if sale_docs:
         await db.sales.insert_many(sale_docs)
-    return {"ok": True, "bills_added": bills_added, "skipped_unmatched": skipped_unmatched,
-            "skipped_duplicates": skipped_dup, "units_sold": units_sold, "qty_sold": qty_sold,
-            "sales_lines": len(sale_docs)}
+    return {"ok": True, "bills_added": bills_added, "dealers_created": dealers_created,
+            "skipped_unmatched": skipped_unmatched, "skipped_duplicates": skipped_dup,
+            "units_sold": units_sold, "qty_sold": qty_sold, "sales_lines": len(sale_docs)}
 
 
 # ---------------- Purchase import ----------------

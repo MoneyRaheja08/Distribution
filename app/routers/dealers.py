@@ -67,7 +67,8 @@ async def dealer_ledger(did: str, company=Depends(current_company), user=Depends
     rows = []
     for b in bills:
         info = unpaid_age.get((b.get("bill_no"), b.get("date")))
-        rows.append({"date": b.get("date"), "type": "bill", "ref": b.get("bill_no"), "debit": b["amount"], "credit": 0,
+        rows.append({"id": b["_id"], "source": b.get("source"), "date": b.get("date"), "type": "bill",
+                     "ref": b.get("bill_no"), "debit": b["amount"], "credit": 0,
                      "days": info["days"] if info else None, "bucket": info["bucket"] if info else None})
     for p in pays:
         if p.get("status") == "bounced" or not p.get("approved", True):
