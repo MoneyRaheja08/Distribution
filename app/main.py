@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import db
-from .routers import auth, backup, bills, companies, dealers, invoices, orders, payments, pricelists, reports, stock, users, visits
+from .routers import auth, backup, bills, catalog, companies, dealers, invoices, orders, payments, pricelists, reports, stock, users, visits
 
 
 @asynccontextmanager
@@ -48,6 +48,7 @@ app.include_router(invoices.router)
 app.include_router(orders.router)
 app.include_router(visits.router)
 app.include_router(reports.router)
+app.include_router(catalog.router)
 app.include_router(backup.router)
 
 

@@ -139,3 +139,47 @@ async def bills_report(frm: str = Query(alias="from"), to: str = Query(...), sou
         rows.append({"dealer": dealers.get(b["dealer_id"], "?"), "bill_no": b.get("bill_no"),
                      "date": b.get("date"), "amount": round(amt), "source": b.get("source")})
     return {"from": frm, "to": to, "source": source, "total": round(total), "rows": rows}
+
+
+@router.get("/sales")
+async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: str = "", brand: str = "",
+                       company=Depends(current_company), _=Depends(admin)):
+    import re as _re
+    query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
+    if brand:
+        query["brand"] = brand.upper()
+    rx = _re.compile(_re.escape(q), _re.I) if q else None
+    rows, total, units, by_dealer = [], 0.0, 0, {}
+    async for s in db.sales.find(query).sort("date", -1):
+        if rx and not (rx.search(s.get("model") or "") or rx.search(s.get("dealer_name") or "") or rx.search(s.get("imei") or "")):
+            continue
+        amt = s.get("amount", 0); total += amt
+        if s.get("imei"):
+            units += 1
+        rows.append({"date": s.get("date"), "bill_no": s.get("bill_no"), "dealer": s.get("dealer_name"),
+                     "brand": s.get("brand"), "group": s.get("group"), "model": s.get("model"),
+                     "imei": s.get("imei"), "qty": s.get("qty", 0), "rate": round(s.get("rate", 0)), "amount": round(amt)})
+        d = by_dealer.setdefault(s.get("dealer_name") or "—", {"amount": 0, "qty": 0})
+        d["amount"] += amt; d["qty"] += s.get("qty", 0) or 1
+    return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:1000],
+            "by_dealer": [{"dealer": k, "amount": round(v["amount"]), "qty": v["qty"]}
+                          for k, v in sorted(by_dealer.items(), key=lambda x: -x[1]["amount"])]}
+
+
+@router.get("/purchases-brand")
+async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
+                                 company=Depends(current_company), _=Depends(admin)):
+    query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
+    if brand:
+        query["brand"] = brand.upper()
+    total, by_brand, by_month, by_cat = 0.0, {}, {}, {}
+    async for p in db.purchases.find(query):
+        amt = p.get("amount", 0); total += amt
+        qty = p.get("qty", 0) or 1
+        b = by_brand.setdefault(p.get("brand") or "—", {"amount": 0, "qty": 0}); b["amount"] += amt; b["qty"] += qty
+        mm = by_month.setdefault((p.get("date") or "")[:7] or "—", {"amount": 0, "qty": 0}); mm["amount"] += amt; mm["qty"] += qty
+        cc = by_cat.setdefault(p.get("group") or p.get("sub_group") or "Other", {"amount": 0, "qty": 0}); cc["amount"] += amt; cc["qty"] += qty
+    return {"from": frm, "to": to, "total": round(total),
+            "by_brand": [{"brand": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_brand.items(), key=lambda x: -x[1]["amount"])],
+            "by_month": [{"month": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_month.items())],
+            "by_category": [{"group": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_cat.items(), key=lambda x: -x[1]["amount"])]}
