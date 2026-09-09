@@ -14,22 +14,60 @@ router = APIRouter(tags=["catalog"])
 staff_only = require_roles("admin", "manager")
 
 
-def _date_iso(s: str):
+def _split_date(s):
     s = (s or "").strip()
     if not s:
         return None
-    sep = "/" if "/" in s else ("-" if "-" in s else None)
-    if not sep:
-        return s
-    parts = s.split(sep)
-    if len(parts) != 3:
-        return s
-    a, b, c = parts
-    if len(a) == 4:                       # YYYY-MM-DD
+    parts = s.replace("/", "-").split("-")
+    return parts if len(parts) == 3 else None
+
+
+def _date_iso(s, fmt="dmy"):
+    p = _split_date(s)
+    if not p:
+        return (s or "").strip() or None
+    a, b, c = p
+
+    def y4(x):
+        return x if len(x) == 4 else ("20" + x if len(x) == 2 else x.zfill(4))
+
+    if len(a) == 4:                       # already YYYY-MM-DD
         return f"{a}-{b.zfill(2)}-{c.zfill(2)}"
-    if len(c) == 2:
-        c = "20" + c
-    return f"{c}-{b.zfill(2)}-{a.zfill(2)}"  # DD?MM?YYYY -> ISO
+    if fmt == "mdy":
+        mm, dd, yy = a, b, c
+    else:                                 # dmy (day first) — default
+        dd, mm, yy = a, b, c
+    return f"{y4(yy)}-{mm.zfill(2)}-{dd.zfill(2)}"
+
+
+def _analyze_dates(raws):
+    """Guess whether dates are day-first (dmy) or month-first (mdy) from values seen."""
+    first_max = second_max = 0
+    for s in raws:
+        p = _split_date(s)
+        if not p or len(p[0]) == 4:
+            continue
+        try:
+            fi, se = int(p[0]), int(p[1])
+        except ValueError:
+            continue
+        first_max = max(first_max, fi)
+        second_max = max(second_max, se)
+    if first_max > 12 and second_max <= 12:
+        return "dmy"
+    if second_max > 12 and first_max <= 12:
+        return "mdy"
+    if first_max > 12 and second_max > 12:
+        return "invalid"
+    return "ambiguous"
+
+
+def _date_info(lines):
+    raws = [l["date_raw"] for l in lines if l.get("date_raw")]
+    uniq = sorted(set(raws))
+    detected = _analyze_dates(raws)
+    return {"detected": detected, "ambiguous": detected in ("ambiguous", "invalid"),
+            "sample": uniq[0] if uniq else "", "raws": uniq}
 
 
 def _num(v, default=0.0):
@@ -39,7 +77,7 @@ def _num(v, default=0.0):
         return default
 
 
-def _parse_csv(data: bytes):
+def _parse_csv(data: bytes, fmt="dmy"):
     """Parse a MARG-style sale/purchase CSV (skips any title preamble)."""
     text = data.decode("utf-8-sig", errors="replace")
     rows = list(csv.reader(io.StringIO(text)))
@@ -71,9 +109,11 @@ def _parse_csv(data: bytes):
         rate = _num(col(r, "RATE"))
         amt_raw = col(r, "AMOUNT")
         amount = _num(amt_raw) if amt_raw else round(qty * rate, 2)
+        raw_date = col(r, "BILL DATE")
         lines.append({
             "bill_no": bill,
-            "date": _date_iso(col(r, "BILL DATE")),
+            "date_raw": raw_date,
+            "date": _date_iso(raw_date, fmt),
             "party": col(r, "PARTY NAME"),
             "brand": col(r, "COMPANY").upper(),
             "group": col(r, "GROUP"),
@@ -113,12 +153,13 @@ async def _sale_context(company):
 
 
 @router.post("/import/sale/preview")
-async def sale_preview(file: UploadFile = File(...), company=Depends(current_company), _=Depends(staff_only)):
+async def sale_preview(file: UploadFile = File(...), date_format: str = "auto",
+                       company=Depends(current_company), _=Depends(staff_only)):
     lines = _parse_csv(await file.read())
     by_name, by_phone, existing = await _sale_context(company)
     groups = {}
     for ln in lines:
-        g = groups.setdefault(ln["bill_no"], {"bill_no": ln["bill_no"], "date": ln["date"],
+        g = groups.setdefault(ln["bill_no"], {"bill_no": ln["bill_no"], "date": ln["date"], "date_raw": ln["date_raw"],
                                               "party": ln["party"], "mobile": ln["mobile"], "total": 0.0, "lines": 0, "units": 0})
         g["total"] += ln["amount"]
         g["lines"] += 1
@@ -145,6 +186,7 @@ async def sale_preview(file: UploadFile = File(...), company=Depends(current_com
             known.add(u["imei"])
     unknown = [i for i in sale_imeis if i not in known]
     return {"brand": lines[0]["brand"] if lines else "", "bills": out,
+            "date_info": _date_info(lines),
             "summary": {"total_bills": len(out), "matched": matched, "unmatched": unmatched,
                         "duplicates": dup, "matched_total": round(matched_total, 2),
                         "total_units": sum(1 for l in lines if l["imei"]), "total_lines": len(lines),
@@ -152,8 +194,15 @@ async def sale_preview(file: UploadFile = File(...), company=Depends(current_com
 
 
 @router.post("/import/sale/commit")
-async def sale_commit(file: UploadFile = File(...), company=Depends(current_company), _=Depends(staff_only)):
+async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
+                      company=Depends(current_company), _=Depends(staff_only)):
     lines = _parse_csv(await file.read())
+    fmt = date_format
+    if fmt not in ("dmy", "mdy", "ymd"):
+        d = _analyze_dates([l["date_raw"] for l in lines])
+        fmt = d if d in ("dmy", "mdy") else "dmy"
+    for l in lines:
+        l["date"] = _date_iso(l["date_raw"], fmt)
     by_name, by_phone, existing = await _sale_context(company)
     now = datetime.now(timezone.utc).isoformat()
     groups = {}
@@ -214,7 +263,8 @@ async def sale_commit(file: UploadFile = File(...), company=Depends(current_comp
 
 # ---------------- Purchase import ----------------
 @router.post("/import/purchase/preview")
-async def purchase_preview(file: UploadFile = File(...), company=Depends(current_company), _=Depends(staff_only)):
+async def purchase_preview(file: UploadFile = File(...), date_format: str = "auto",
+                           company=Depends(current_company), _=Depends(staff_only)):
     lines = _parse_csv(await file.read())
     imeis = [l["imei"] for l in lines if l["imei"]]
     dup = set()
@@ -229,6 +279,7 @@ async def purchase_preview(file: UploadFile = File(...), company=Depends(current
         c["qty"] += l["qty"] or 1
         c["amount"] += l["amount"]
     return {"brand": lines[0]["brand"] if lines else "", "supplier": lines[0]["supplier"] if lines else "",
+            "date_info": _date_info(lines),
             "summary": {"lines": len(lines), "imei_units": len(imeis),
                         "qty_only": sum(l["qty"] for l in lines if not l["imei"]),
                         "total": round(sum(l["amount"] for l in lines), 2), "duplicates": len(dup),
@@ -238,8 +289,15 @@ async def purchase_preview(file: UploadFile = File(...), company=Depends(current
 
 
 @router.post("/import/purchase/commit")
-async def purchase_commit(file: UploadFile = File(...), company=Depends(current_company), _=Depends(staff_only)):
+async def purchase_commit(file: UploadFile = File(...), date_format: str = "dmy",
+                          company=Depends(current_company), _=Depends(staff_only)):
     lines = _parse_csv(await file.read())
+    fmt = date_format
+    if fmt not in ("dmy", "mdy", "ymd"):
+        d = _analyze_dates([l["date_raw"] for l in lines])
+        fmt = d if d in ("dmy", "mdy") else "dmy"
+    for l in lines:
+        l["date"] = _date_iso(l["date_raw"], fmt)
     now = datetime.now(timezone.utc).isoformat()
     imeis = [l["imei"] for l in lines if l["imei"]]
     existing = set()
