@@ -196,14 +196,41 @@ async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), br
     if brand:
         query["brand"] = brand.upper()
     by_model, tot_sale, tot_cost, units = {}, 0.0, 0.0, 0
+    by_month = {}
     async for u in db.stock_units.find(query):
         sr = u.get("sale_rate") or 0
         pr = u.get("purchase_rate") or 0
         units += 1; tot_sale += sr; tot_cost += pr
         m = by_model.setdefault(u.get("model") or "—", {"model": u.get("model") or "—", "brand": u.get("brand"), "qty": 0, "sale": 0, "cost": 0})
         m["qty"] += 1; m["sale"] += sr; m["cost"] += pr
+        mo = (u.get("sale_date") or "")[:7] or "—"
+        mm = by_month.setdefault(mo, {"sale": 0, "cost": 0})
+        mm["sale"] += sr; mm["cost"] += pr
     rows = [{"model": v["model"], "brand": v["brand"], "qty": v["qty"], "sale": round(v["sale"]),
              "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])} for v in by_model.values()]
     rows.sort(key=lambda x: -x["margin"])
     return {"from": frm, "to": to, "units": units, "total_sale": round(tot_sale), "total_cost": round(tot_cost),
-            "total_margin": round(tot_sale - tot_cost), "rows": rows}
+            "total_margin": round(tot_sale - tot_cost), "rows": rows,
+            "by_month": [{"month": k, "sale": round(v["sale"]), "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])}
+                         for k, v in sorted(by_month.items())]}
+
+
+@router.get("/brand-scorecard")
+async def brand_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
+                          company=Depends(current_company), _=Depends(admin)):
+    brands = {}
+
+    def b(name):
+        return brands.setdefault(name or "—", {"brand": name or "—", "purchase_amount": 0, "purchase_qty": 0,
+                                               "sale_amount": 0, "sale_units": 0, "stock_value": 0, "stock_units": 0, "margin": 0})
+    async for p in db.purchases.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+        x = b(p.get("brand")); x["purchase_amount"] += p.get("amount", 0); x["purchase_qty"] += p.get("qty", 0) or 1
+    async for s in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+        x = b(s.get("brand")); x["sale_amount"] += s.get("amount", 0); x["sale_units"] += 1 if s.get("imei") else (s.get("qty", 0) or 1)
+    async for u in db.stock_units.find({"company_id": company, "status": "in_stock"}):
+        x = b(u.get("brand")); x["stock_value"] += u.get("purchase_rate") or 0; x["stock_units"] += 1
+    async for u in db.stock_units.find({"company_id": company, "status": "sold", "sale_date": {"$gte": frm, "$lte": to}}):
+        x = b(u.get("brand")); x["margin"] += (u.get("sale_rate") or 0) - (u.get("purchase_rate") or 0)
+    rows = [{k: (round(v[k]) if k != "brand" else v[k]) for k in v} for v in brands.values()]
+    rows.sort(key=lambda r: -r["sale_amount"])
+    return {"from": frm, "to": to, "rows": rows}
