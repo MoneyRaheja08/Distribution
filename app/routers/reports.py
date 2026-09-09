@@ -216,75 +216,101 @@ async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), br
 
 
 @router.get("/profit2")
-async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...),
+async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
                          company=Depends(current_company), _=Depends(admin)):
-    """Real working-capital & return model. Gross margin, stock value and receivables
-    come from actual data; scheme/opex/cost-of-capital/Haier-credit are set on the client."""
+    """Real working-capital & return model, per brand. Revenue, COGS, gross margin and
+    stock value come from the imported Sale/Purchase catalog for the chosen brand.
+    Receivables aren't stored per brand, so when a brand is picked they are shown as an
+    estimated share (by that brand's revenue). Scheme/opex/cost-of-capital/Haier-credit
+    are set on the client."""
     from datetime import date as _date
-    # period length (for annualising)
     try:
         y1, m1, d1 = [int(x) for x in frm.split("-")]; y2, m2, d2 = [int(x) for x in to.split("-")]
         days = max(1, (_date(y2, m2, d2) - _date(y1, m1, d1)).days + 1)
     except Exception:
         days = 30
     factor = 365.0 / days
+    bsel = brand.strip().upper()
 
-    # avg purchase rate per model (for lot/qty sales cost) + imei purchase cost
-    model_cost = {}
+    # avg purchase cost per (brand, model) + collect brand list
+    model_cost, brands_seen = {}, set()
     async for pr in db.purchases.find({"company_id": company}):
-        mk = pr.get("model") or "—"
-        mc = model_cost.setdefault(mk, {"amt": 0.0, "qty": 0})
+        bb = (pr.get("brand") or "—")
+        brands_seen.add(bb)
+        mc = model_cost.setdefault((bb, pr.get("model") or "—"), {"amt": 0.0, "qty": 0})
         mc["amt"] += pr.get("amount", 0) or 0; mc["qty"] += (pr.get("qty", 0) or 0)
-    def avg_cost(model):
-        mc = model_cost.get(model)
+
+    def avg_cost(bb, model):
+        mc = model_cost.get((bb, model))
         return (mc["amt"] / mc["qty"]) if mc and mc["qty"] else 0.0
+
     imei_pr = {}
     async for u in db.stock_units.find({"company_id": company, "status": "sold"}, {"imei": 1, "purchase_rate": 1}):
         if u.get("imei"):
             imei_pr[u["imei"]] = u.get("purchase_rate") or 0
 
-    revenue = cogs = 0.0
+    revenue = cogs = total_rev_all = 0.0
     units = 0
     async for sdoc in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
         amt = sdoc.get("amount", 0) or 0
+        bb = (sdoc.get("brand") or "—")
+        brands_seen.add(bb)
+        total_rev_all += amt
+        if bsel and bb != bsel:
+            continue
         revenue += amt
         if sdoc.get("imei"):
             units += 1
-            cogs += imei_pr.get(sdoc["imei"], avg_cost(sdoc.get("model") or "—"))
+            cogs += imei_pr.get(sdoc["imei"], avg_cost(bb, sdoc.get("model") or "—"))
         else:
             q = sdoc.get("qty", 0) or 0
             units += q
-            cogs += q * avg_cost(sdoc.get("model") or "—")
+            cogs += q * avg_cost(bb, sdoc.get("model") or "—")
     gross = revenue - cogs
 
-    # stock value on hand (capital in stock): serial units + lots
+    # stock value on hand (brand-filtered)
     stock_value = 0.0
-    async for u in db.stock_units.find({"company_id": company, "status": "in_stock"}, {"purchase_rate": 1}):
+    su_q = {"company_id": company, "status": "in_stock"}
+    if bsel:
+        su_q["brand"] = bsel
+    async for u in db.stock_units.find(su_q, {"purchase_rate": 1}):
         stock_value += u.get("purchase_rate") or 0
-    async for lot in db.stock_lots.find({"company_id": company}):
+    lot_q = {"company_id": company}
+    if bsel:
+        lot_q["brand"] = bsel
+    async for lot in db.stock_lots.find(lot_q):
         avail = (lot.get("in_qty", 0) or 0) - (lot.get("sold_qty", 0) or 0)
         if avail > 0:
-            stock_value += avail * avg_cost(lot.get("model") or "—")
+            stock_value += avail * avg_cost(lot.get("brand") or "—", lot.get("model") or "—")
 
-    # receivables (capital in dealer credit) = company outstanding right now
+    # receivables (company-wide), prorated to the brand by its revenue share
     dealers = [d["_id"] async for d in db.dealers.find({"company_id": company}, {"_id": 1})]
     bills_by, pays_by = {}, {}
     async for b in db.bills.find({"company_id": company}):
         bills_by.setdefault(b["dealer_id"], []).append(b)
     async for pmt in db.payments.find({"company_id": company}):
         pays_by.setdefault(pmt["dealer_id"], []).append(pmt)
-    receivables = 0.0
+    total_receivables = 0.0
     for did in dealers:
-        receivables += compute(bills_by.get(did, []), pays_by.get(did, []))["outstanding"]
+        total_receivables += compute(bills_by.get(did, []), pays_by.get(did, []))["outstanding"]
+    if bsel and total_rev_all > 0:
+        receivables = total_receivables * (revenue / total_rev_all)
+        recv_est = True
+    else:
+        receivables = total_receivables
+        recv_est = False
 
     ann_sales = revenue * factor
     ann_cogs = cogs * factor
     stock_days = (stock_value / ann_cogs * 365) if ann_cogs > 0 else 0
     recv_days = (receivables / ann_sales * 365) if ann_sales > 0 else 0
     return {"from": frm, "to": to, "period_days": days,
+            "brand": bsel, "brands": sorted(b for b in brands_seen if b and b != "—"),
             "revenue": round(revenue), "cogs": round(cogs), "gross": round(gross),
             "gross_margin_pct": round(gross / revenue * 100, 2) if revenue else 0,
-            "units": units, "stock_value": round(stock_value), "receivables": round(receivables),
+            "units": units, "stock_value": round(stock_value),
+            "receivables": round(receivables), "receivables_estimated": recv_est,
+            "total_receivables": round(total_receivables),
             "ann_sales": round(ann_sales), "ann_cogs": round(ann_cogs),
             "stock_days": round(stock_days), "recv_days": round(recv_days)}
 
