@@ -92,30 +92,40 @@ def _parse_csv(data: bytes):
 
 
 # ---------------- Sale import ----------------
+def _ph(s):
+    d = "".join(c for c in (s or "") if c.isdigit())
+    return d[-10:] if len(d) >= 10 else d
+
+
+def _match_dealer(by_name, by_phone, party, mobile):
+    return by_name.get((party or "").strip().lower()) or (by_phone.get(_ph(mobile)) if _ph(mobile) else None)
+
+
 async def _sale_context(company):
     dealers = [d async for d in db.dealers.find({"company_id": company})]
     by_name = {d["name"].strip().lower(): d for d in dealers}
+    by_phone = {_ph(d.get("phone")): d for d in dealers if _ph(d.get("phone"))}
     existing = set()
     async for b in db.bills.find({"company_id": company}, {"dealer_id": 1, "bill_no": 1}):
         existing.add((b["dealer_id"], (b.get("bill_no") or "").strip().lower()))
-    return by_name, existing
+    return by_name, by_phone, existing
 
 
 @router.post("/import/sale/preview")
 async def sale_preview(file: UploadFile = File(...), company=Depends(current_company), _=Depends(staff_only)):
     lines = _parse_csv(await file.read())
-    by_name, existing = await _sale_context(company)
+    by_name, by_phone, existing = await _sale_context(company)
     groups = {}
     for ln in lines:
         g = groups.setdefault(ln["bill_no"], {"bill_no": ln["bill_no"], "date": ln["date"],
-                                              "party": ln["party"], "total": 0.0, "lines": 0, "units": 0})
+                                              "party": ln["party"], "mobile": ln["mobile"], "total": 0.0, "lines": 0, "units": 0})
         g["total"] += ln["amount"]
         g["lines"] += 1
         if ln["imei"]:
             g["units"] += 1
     out, matched, unmatched, dup, matched_total = [], 0, 0, 0, 0.0
     for g in groups.values():
-        d = by_name.get((g["party"] or "").strip().lower())
+        d = _match_dealer(by_name, by_phone, g["party"], g.get("mobile"))
         is_dup = d is not None and (d["_id"], g["bill_no"].strip().lower()) in existing
         out.append({**g, "total": round(g["total"], 2), "matched": d is not None,
                     "dealer": d["name"] if d else None, "duplicate": is_dup})
@@ -143,7 +153,7 @@ async def sale_preview(file: UploadFile = File(...), company=Depends(current_com
 @router.post("/import/sale/commit")
 async def sale_commit(file: UploadFile = File(...), company=Depends(current_company), _=Depends(staff_only)):
     lines = _parse_csv(await file.read())
-    by_name, existing = await _sale_context(company)
+    by_name, by_phone, existing = await _sale_context(company)
     now = datetime.now(timezone.utc).isoformat()
     groups = {}
     for ln in lines:
@@ -151,7 +161,7 @@ async def sale_commit(file: UploadFile = File(...), company=Depends(current_comp
     bills_added = skipped_unmatched = skipped_dup = 0
     bill_docs = []
     for bill_no, glines in groups.items():
-        d = by_name.get((glines[0]["party"] or "").strip().lower())
+        d = _match_dealer(by_name, by_phone, glines[0]["party"], glines[0].get("mobile"))
         if not d:
             skipped_unmatched += 1
             continue
@@ -170,7 +180,7 @@ async def sale_commit(file: UploadFile = File(...), company=Depends(current_comp
     units_sold = qty_sold = 0
     sale_docs = []
     for ln in lines:
-        d = by_name.get((ln["party"] or "").strip().lower())
+        d = _match_dealer(by_name, by_phone, ln["party"], ln.get("mobile"))
         sale_docs.append({"_id": uuid.uuid4().hex, "company_id": company, "brand": ln["brand"], "group": ln["group"],
                           "sub_group": ln["sub_group"], "model": ln["model"], "godown": ln["godown"], "qty": ln["qty"],
                           "rate": ln["rate"], "amount": ln["amount"], "imei": ln["imei"] or None,

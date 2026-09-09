@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from fastapi import HTTPException
-from ..auth import get_current_user, require_roles
+from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
 from ..ledger import compute, bill_breakdown
@@ -234,3 +234,18 @@ async def brand_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
     rows = [{k: (round(v[k]) if k != "brand" else v[k]) for k in v} for v in brands.values()]
     rows.sort(key=lambda r: -r["sale_amount"])
     return {"from": frm, "to": to, "rows": rows}
+
+
+@router.get("/top-performers")
+async def top_performers(frm: str = Query(alias="from"), to: str = Query(...),
+                         company=Depends(current_company), _=Depends(admin)):
+    skus, deal = {}, {}
+    async for s in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+        amt = s.get("amount", 0); qty = s.get("qty", 0) or 1
+        k = s.get("model") or "—"
+        x = skus.setdefault(k, {"model": k, "brand": s.get("brand"), "amount": 0, "qty": 0}); x["amount"] += amt; x["qty"] += qty
+        dn = s.get("dealer_name") or "—"
+        y = deal.setdefault(dn, {"dealer": dn, "amount": 0, "qty": 0}); y["amount"] += amt; y["qty"] += qty
+    top_skus = sorted([{**v, "amount": round(v["amount"])} for v in skus.values()], key=lambda x: -x["amount"])[:10]
+    top_dealers = sorted([{**v, "amount": round(v["amount"])} for v in deal.values()], key=lambda x: -x["amount"])[:10]
+    return {"from": frm, "to": to, "top_skus": top_skus, "top_dealers": top_dealers}
