@@ -209,7 +209,9 @@ async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), br
     rows = [{"model": v["model"], "brand": v["brand"], "qty": v["qty"], "sale": round(v["sale"]),
              "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])} for v in by_model.values()]
     rows.sort(key=lambda x: -x["margin"])
-    return {"from": frm, "to": to, "units": units, "total_sale": round(tot_sale), "total_cost": round(tot_cost),
+    brands = sorted(b for b in await db.stock_units.distinct("brand", {"company_id": company}) if b)
+    return {"from": frm, "to": to, "brand": brand.upper(), "brands": brands,
+            "units": units, "total_sale": round(tot_sale), "total_cost": round(tot_cost),
             "total_margin": round(tot_sale - tot_cost), "rows": rows,
             "by_month": [{"month": k, "sale": round(v["sale"]), "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])}
                          for k, v in sorted(by_month.items())]}
@@ -250,23 +252,41 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
             imei_pr[u["imei"]] = u.get("purchase_rate") or 0
 
     revenue = cogs = total_rev_all = 0.0
-    units = 0
-    async for sdoc in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+    units = dups = 0
+    seen, by_model, by_month = {}, {}, {}
+    async for sdoc in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}).sort("created_at", 1):
         amt = sdoc.get("amount", 0) or 0
-        bb = (sdoc.get("brand") or "—")
+        bb = (sdoc.get("brand") or "—").strip().upper()
+        model = sdoc.get("model") or "—"
         brands_seen.add(bb)
+        # same line re-imported in another batch → count once
+        key = (sdoc.get("bill_no"), sdoc.get("imei")) if sdoc.get("imei") else (sdoc.get("bill_no"), model, sdoc.get("qty"), amt)
+        batch = sdoc.get("import_batch") or ""
+        if key in seen and seen[key] != batch:
+            dups += 1
+            continue
+        seen[key] = batch
         total_rev_all += amt
         if bsel and bb != bsel:
             continue
         revenue += amt
         if sdoc.get("imei"):
-            units += 1
-            cogs += imei_pr.get(sdoc["imei"], avg_cost(bb, sdoc.get("model") or "—"))
+            q = 1
+            c = imei_pr.get(sdoc["imei"], avg_cost(bb, model))
         else:
             q = sdoc.get("qty", 0) or 0
-            units += q
-            cogs += q * avg_cost(bb, sdoc.get("model") or "—")
+            c = q * avg_cost(bb, model)
+        units += q; cogs += c
+        m = by_model.setdefault(model, {"model": model, "brand": bb, "qty": 0, "sale": 0.0, "cost": 0.0})
+        m["qty"] += q; m["sale"] += amt; m["cost"] += c
+        mo = (sdoc.get("date") or "")[:7] or "—"
+        mm = by_month.setdefault(mo, {"sale": 0.0, "cost": 0.0})
+        mm["sale"] += amt; mm["cost"] += c
     gross = revenue - cogs
+    rows = [{"model": v["model"], "brand": v["brand"], "qty": v["qty"], "sale": round(v["sale"]), "cost": round(v["cost"]),
+             "margin": round(v["sale"] - v["cost"]),
+             "margin_pct": round((v["sale"] - v["cost"]) / v["sale"] * 100, 1) if v["sale"] else 0} for v in by_model.values()]
+    rows.sort(key=lambda x: -x["sale"])
 
     # stock value on hand (brand-filtered)
     stock_value = 0.0
@@ -308,7 +328,10 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
             "brand": bsel, "brands": sorted(b for b in brands_seen if b and b != "—"),
             "revenue": round(revenue), "cogs": round(cogs), "gross": round(gross),
             "gross_margin_pct": round(gross / revenue * 100, 2) if revenue else 0,
-            "units": units, "stock_value": round(stock_value),
+            "units": units, "duplicates_ignored": dups, "rows": rows,
+            "by_month": [{"month": k, "sale": round(v["sale"]), "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])}
+                         for k, v in sorted(by_month.items())],
+            "stock_value": round(stock_value),
             "receivables": round(receivables), "receivables_estimated": recv_est,
             "total_receivables": round(total_receivables),
             "ann_sales": round(ann_sales), "ann_cogs": round(ann_cogs),

@@ -249,6 +249,7 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
 
     bills_added = skipped_unmatched = skipped_dup = 0
     bill_docs = []
+    dup_bills = set()
     for bill_no, glines in groups.items():
         d = await _ensure_dealer(glines[0]["party"], glines[0].get("mobile"))
         if not d:
@@ -257,6 +258,7 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
         key = (d["_id"], bill_no.strip().lower())
         if key in existing:
             skipped_dup += 1
+            dup_bills.add(bill_no)
             continue
         existing.add(key)
         bill_docs.append({"_id": uuid.uuid4().hex, "dealer_id": d["_id"], "bill_no": bill_no,
@@ -270,6 +272,8 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
     lot_sold = {}
     sale_docs = []
     for ln in lines:
+        if ln["bill_no"] in dup_bills:
+            continue
         d = _match_dealer(by_name, by_phone, ln["party"], ln.get("mobile"))
         sale_docs.append({"_id": uuid.uuid4().hex, "company_id": company, "brand": ln["brand"], "group": ln["group"],
                           "sub_group": ln["sub_group"], "model": ln["model"], "godown": ln["godown"], "qty": ln["qty"],
