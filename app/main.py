@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db import db
@@ -50,6 +51,18 @@ app.include_router(visits.router)
 app.include_router(reports.router)
 app.include_router(catalog.router)
 app.include_router(backup.router)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Ensure crashes still carry CORS headers so browsers surface the real
+    # error instead of an opaque "Failed to fetch" on cross-origin deploys.
+    origin = request.headers.get("origin", "*")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Server error: {type(exc).__name__}: {exc}"},
+        headers={"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true"},
+    )
 
 
 @app.get("/health")

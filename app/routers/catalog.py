@@ -84,6 +84,7 @@ def _parse_csv(data: bytes):
             "rate": rate,
             "amount": amount,
             "imei": col(r, "IMEI").strip(),
+            "mobile": col(r, "MOBILE NO", "MOBILE", "PHONE", "MOBILE NUMBER"),
             "supplier": col(r, "PARTY NAME"),
         })
     if not lines:
