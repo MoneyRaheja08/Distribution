@@ -221,6 +221,7 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
         l["date"] = _date_iso(l["date_raw"], fmt)
     by_name, by_phone, existing = await _sale_context(company)
     now = datetime.now(timezone.utc).isoformat()
+    batch_id = uuid.uuid4().hex
     groups = {}
     for ln in lines:
         groups.setdefault(ln["bill_no"], []).append(ln)
@@ -237,7 +238,8 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
             return None
         ph = _ph(mobile)
         doc = {"_id": uuid.uuid4().hex, "name": party, "area": None, "phone": (mobile or "").strip() or None,
-               "credit_limit": 0, "collector_id": None, "company_id": company, "source": "sale_csv"}
+               "credit_limit": 0, "collector_id": None, "company_id": company, "source": "sale_csv",
+               "import_batch": batch_id}
         await db.dealers.insert_one(doc)
         by_name[party.lower()] = doc
         if ph:
@@ -259,12 +261,13 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
         existing.add(key)
         bill_docs.append({"_id": uuid.uuid4().hex, "dealer_id": d["_id"], "bill_no": bill_no,
                           "date": glines[0]["date"], "amount": round(sum(l["amount"] for l in glines), 2),
-                          "source": "sale_csv", "company_id": company})
+                          "source": "sale_csv", "company_id": company, "import_batch": batch_id})
         bills_added += 1
     if bill_docs:
         await db.bills.insert_many(bill_docs)
 
     units_sold = qty_sold = 0
+    lot_sold = {}
     sale_docs = []
     for ln in lines:
         d = _match_dealer(by_name, by_phone, ln["party"], ln.get("mobile"))
@@ -272,18 +275,20 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
                           "sub_group": ln["sub_group"], "model": ln["model"], "godown": ln["godown"], "qty": ln["qty"],
                           "rate": ln["rate"], "amount": ln["amount"], "imei": ln["imei"] or None,
                           "dealer_id": d["_id"] if d else None, "dealer_name": ln["party"],
-                          "bill_no": ln["bill_no"], "date": ln["date"], "created_at": now})
+                          "bill_no": ln["bill_no"], "date": ln["date"], "created_at": now, "import_batch": batch_id})
         if ln["imei"]:
             await db.stock_units.update_one(
                 {"company_id": company, "imei": ln["imei"]},
                 {"$set": {"status": "sold", "sale_bill": ln["bill_no"], "sale_dealer_id": d["_id"] if d else None,
-                          "sale_dealer_name": ln["party"], "sale_rate": ln["rate"], "sale_date": ln["date"]},
+                          "sale_dealer_name": ln["party"], "sale_rate": ln["rate"], "sale_date": ln["date"],
+                          "sale_import_batch": batch_id},
                  "$setOnInsert": {"_id": uuid.uuid4().hex, "company_id": company, "imei": ln["imei"], "brand": ln["brand"],
                                   "group": ln["group"], "sub_group": ln["sub_group"], "model": ln["model"],
-                                  "godown": ln["godown"], "created_at": now}},
+                                  "godown": ln["godown"], "created_at": now, "created_by_sale": True}},
                 upsert=True)
             units_sold += 1
         else:
+            lot_sold[(ln["brand"], ln["model"])] = lot_sold.get((ln["brand"], ln["model"]), 0) + ln["qty"]
             await db.stock_lots.update_one(
                 {"company_id": company, "brand": ln["brand"], "model": ln["model"]},
                 {"$inc": {"sold_qty": ln["qty"]},
@@ -293,7 +298,14 @@ async def sale_commit(file: UploadFile = File(...), date_format: str = "dmy",
             qty_sold += ln["qty"]
     if sale_docs:
         await db.sales.insert_many(sale_docs)
-    return {"ok": True, "bills_added": bills_added, "dealers_created": dealers_created,
+    await db.import_batches.insert_one({
+        "_id": batch_id, "company_id": company, "kind": "sale",
+        "brand": lines[0]["brand"] if lines else "", "filename": file.filename,
+        "created_at": now, "undone": False,
+        "lot_sold": [{"brand": b, "model": m, "qty": q} for (b, m), q in lot_sold.items()],
+        "counts": {"bills_added": bills_added, "dealers_created": dealers_created,
+                   "units_sold": units_sold, "qty_sold": qty_sold, "sales_lines": len(sale_docs)}})
+    return {"ok": True, "batch_id": batch_id, "bills_added": bills_added, "dealers_created": dealers_created,
             "skipped_unmatched": skipped_unmatched, "skipped_duplicates": skipped_dup,
             "units_sold": units_sold, "qty_sold": qty_sold, "sales_lines": len(sale_docs)}
 
@@ -336,18 +348,21 @@ async def purchase_commit(file: UploadFile = File(...), date_format: str = "dmy"
     for l in lines:
         l["date"] = _date_iso(l["date_raw"], fmt)
     now = datetime.now(timezone.utc).isoformat()
+    batch_id = uuid.uuid4().hex
     imeis = [l["imei"] for l in lines if l["imei"]]
     existing = set()
     if imeis:
         async for u in db.stock_units.find({"company_id": company, "imei": {"$in": imeis}}, {"imei": 1}):
             existing.add(u["imei"])
     units_added = dupes = qty_added = 0
+    lot_in = {}
     unit_docs, purchase_docs = [], []
     for l in lines:
         purchase_docs.append({"_id": uuid.uuid4().hex, "company_id": company, "brand": l["brand"], "group": l["group"],
                               "sub_group": l["sub_group"], "model": l["model"], "godown": l["godown"], "qty": l["qty"],
                               "rate": l["rate"], "amount": l["amount"], "imei": l["imei"] or None,
-                              "supplier": l["supplier"], "bill_no": l["bill_no"], "date": l["date"], "created_at": now})
+                              "supplier": l["supplier"], "bill_no": l["bill_no"], "date": l["date"], "created_at": now,
+                              "import_batch": batch_id})
         if l["imei"]:
             if l["imei"] in existing:
                 dupes += 1
@@ -356,9 +371,11 @@ async def purchase_commit(file: UploadFile = File(...), date_format: str = "dmy"
             unit_docs.append({"_id": uuid.uuid4().hex, "company_id": company, "imei": l["imei"], "brand": l["brand"],
                               "group": l["group"], "sub_group": l["sub_group"], "model": l["model"], "godown": l["godown"],
                               "status": "in_stock", "purchase_bill": l["bill_no"], "purchase_rate": l["rate"],
-                              "purchase_date": l["date"], "supplier": l["supplier"], "created_at": now})
+                              "purchase_date": l["date"], "supplier": l["supplier"], "created_at": now,
+                              "import_batch": batch_id})
             units_added += 1
         else:
+            lot_in[(l["brand"], l["model"])] = lot_in.get((l["brand"], l["model"]), 0) + l["qty"]
             await db.stock_lots.update_one(
                 {"company_id": company, "brand": l["brand"], "model": l["model"]},
                 {"$inc": {"in_qty": l["qty"]},
@@ -370,8 +387,75 @@ async def purchase_commit(file: UploadFile = File(...), date_format: str = "dmy"
         await db.stock_units.insert_many(unit_docs)
     if purchase_docs:
         await db.purchases.insert_many(purchase_docs)
-    return {"ok": True, "units_added": units_added, "qty_added": qty_added, "duplicates": dupes,
-            "purchase_lines": len(purchase_docs)}
+    await db.import_batches.insert_one({
+        "_id": batch_id, "company_id": company, "kind": "purchase",
+        "brand": lines[0]["brand"] if lines else "", "filename": file.filename,
+        "created_at": now, "undone": False,
+        "lot_in": [{"brand": b, "model": m, "qty": q} for (b, m), q in lot_in.items()],
+        "counts": {"units_added": units_added, "qty_added": qty_added, "duplicates": dupes,
+                   "purchase_lines": len(purchase_docs)}})
+    return {"ok": True, "batch_id": batch_id, "units_added": units_added, "qty_added": qty_added,
+            "duplicates": dupes, "purchase_lines": len(purchase_docs)}
+
+
+# ---------------- Import batches (undo) ----------------
+@router.get("/import/batches")
+async def list_batches(limit: int = 15, company=Depends(current_company), _=Depends(staff_only)):
+    out = []
+    async for b in db.import_batches.find({"company_id": company, "undone": {"$ne": True}}).sort("created_at", -1).limit(limit):
+        out.append({"id": b["_id"], "kind": b.get("kind"), "brand": b.get("brand"),
+                    "filename": b.get("filename"), "created_at": b.get("created_at"), "counts": b.get("counts", {})})
+    return out
+
+
+@router.post("/import/batches/{batch_id}/undo")
+async def undo_batch(batch_id: str, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    batch = await db.import_batches.find_one({"_id": batch_id, "company_id": company})
+    if not batch:
+        raise HTTPException(404, "Import batch not found")
+    if batch.get("undone"):
+        raise HTTPException(400, "This import was already undone")
+    result = {"kind": batch.get("kind")}
+    if batch.get("kind") == "sale":
+        bills_removed = (await db.bills.delete_many({"company_id": company, "import_batch": batch_id})).deleted_count
+        await db.sales.delete_many({"company_id": company, "import_batch": batch_id})
+        reverted = removed_units = 0
+        async for u in db.stock_units.find({"company_id": company, "sale_import_batch": batch_id}):
+            if u.get("created_by_sale"):
+                await db.stock_units.delete_one({"_id": u["_id"]})
+                removed_units += 1
+            else:
+                await db.stock_units.update_one({"_id": u["_id"]},
+                    {"$set": {"status": "in_stock"},
+                     "$unset": {"sale_bill": "", "sale_dealer_id": "", "sale_dealer_name": "",
+                                "sale_rate": "", "sale_date": "", "sale_import_batch": ""}})
+                reverted += 1
+        for lot in batch.get("lot_sold", []):
+            await db.stock_lots.update_one({"company_id": company, "brand": lot["brand"], "model": lot["model"]},
+                                           {"$inc": {"sold_qty": -lot["qty"]}})
+        dealers_removed = 0
+        async for d in db.dealers.find({"company_id": company, "import_batch": batch_id}):
+            if not await db.bills.count_documents({"dealer_id": d["_id"]}) and not await db.payments.count_documents({"dealer_id": d["_id"]}):
+                await db.dealers.delete_one({"_id": d["_id"]})
+                dealers_removed += 1
+        result.update({"bills_removed": bills_removed, "units_reverted": reverted,
+                       "units_removed": removed_units, "dealers_removed": dealers_removed})
+    else:
+        purchases_removed = (await db.purchases.delete_many({"company_id": company, "import_batch": batch_id})).deleted_count
+        removed_units = kept_sold = 0
+        async for u in db.stock_units.find({"company_id": company, "import_batch": batch_id}):
+            if u.get("status") == "in_stock":
+                await db.stock_units.delete_one({"_id": u["_id"]})
+                removed_units += 1
+            else:
+                kept_sold += 1
+        for lot in batch.get("lot_in", []):
+            await db.stock_lots.update_one({"company_id": company, "brand": lot["brand"], "model": lot["model"]},
+                                           {"$inc": {"in_qty": -lot["qty"]}})
+        result.update({"purchases_removed": purchases_removed, "units_removed": removed_units, "units_kept_sold": kept_sold})
+    await db.import_batches.update_one({"_id": batch_id},
+                                       {"$set": {"undone": True, "undone_at": datetime.now(timezone.utc).isoformat()}})
+    return {"ok": True, **result}
 
 
 # ---------------- Catalog / IMEI ----------------

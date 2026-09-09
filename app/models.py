@@ -208,6 +208,10 @@ class BulkBills(BaseModel):
     bills: list[BulkBillRow]
 
 
+class MergeIn(BaseModel):
+    source_ids: list[str] = []
+
+
 # ---- companies (multi-company) ----
 class CompanyIn(BaseModel):
     name: str

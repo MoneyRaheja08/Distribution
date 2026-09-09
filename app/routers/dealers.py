@@ -9,7 +9,7 @@ from ..auth import get_current_user, is_staff, require_roles
 from ..deps import current_company
 from ..db import db
 from ..ledger import compute, bill_breakdown
-from ..models import BillIn, BulkBills, DealerIn, DealerPatch, SeedIn, VisitIn
+from ..models import BillIn, BulkBills, DealerIn, DealerPatch, MergeIn, SeedIn, VisitIn
 from ..serializers import public_dealer
 
 router = APIRouter(prefix="/dealers", tags=["dealers"])
@@ -37,6 +37,48 @@ async def list_dealers(company=Depends(current_company), user=Depends(get_curren
     async for v in db.visits.find({"user_id": user["_id"], "date": today}):
         visited.add(v["dealer_id"])
     return [public_dealer(d, compute(bills_by.get(d["_id"], []), pays_by.get(d["_id"], [])), d["_id"] in visited) for d in dealers]
+
+
+@router.get("/duplicates")
+async def dealer_duplicates(company=Depends(current_company), _=Depends(require_roles("admin"))):
+    """Group dealers that look like the same shop — same normalized name or same phone."""
+    dealers = [d async for d in db.dealers.find({"company_id": company})]
+    ids = [d["_id"] for d in dealers]
+    bills_by, pays_by = {}, {}
+    async for b in db.bills.find({"dealer_id": {"$in": ids}}):
+        bills_by.setdefault(b["dealer_id"], []).append(b)
+    async for p in db.payments.find({"dealer_id": {"$in": ids}}):
+        pays_by.setdefault(p["dealer_id"], []).append(p)
+
+    def norm(n):
+        return re.sub(r"[^a-z0-9]", "", (n or "").lower())
+
+    def ph(p):
+        digits = "".join(c for c in (p or "") if c.isdigit())
+        return digits[-10:] if len(digits) >= 10 else ""
+
+    groups = {}
+    for d in dealers:
+        summ = compute(bills_by.get(d["_id"], []), pays_by.get(d["_id"], []))
+        info = {"id": d["_id"], "name": d["name"], "phone": d.get("phone"),
+                "outstanding": summ["outstanding"], "bills": len(bills_by.get(d["_id"], [])), "source": d.get("source")}
+        nk = norm(d["name"])
+        if nk:
+            groups.setdefault(("name", nk), []).append(info)
+        pk = ph(d.get("phone"))
+        if pk:
+            groups.setdefault(("phone", pk), []).append(info)
+    out, seen = [], set()
+    for (reason, key), members in groups.items():
+        uniq = {m["id"]: m for m in members}
+        if len(uniq) < 2:
+            continue
+        sig = tuple(sorted(uniq.keys()))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append({"key": reason + ":" + key, "reason": reason, "dealers": list(uniq.values())})
+    return out
 
 
 @router.get("/{did}")
@@ -165,6 +207,31 @@ async def seed_ledger(did: str, body: SeedIn, company=Depends(current_company), 
     if pdocs:
         await db.payments.insert_many(pdocs)
     return {"ok": True, "summary": await _summary(did)}
+
+
+@router.post("/{did}/merge")
+async def merge_dealers(did: str, body: MergeIn, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    """Move all bills, payments, sales and stock links from source dealers into the target, then delete the sources."""
+    target = await db.dealers.find_one({"_id": did, "company_id": company})
+    if not target:
+        raise HTTPException(404, "Target dealer not found")
+    merged = 0
+    for sid in body.source_ids:
+        if sid == did:
+            continue
+        src = await db.dealers.find_one({"_id": sid, "company_id": company})
+        if not src:
+            continue
+        await db.bills.update_many({"dealer_id": sid}, {"$set": {"dealer_id": did}})
+        await db.payments.update_many({"dealer_id": sid}, {"$set": {"dealer_id": did}})
+        await db.sales.update_many({"company_id": company, "dealer_id": sid}, {"$set": {"dealer_id": did}})
+        await db.stock_units.update_many({"company_id": company, "sale_dealer_id": sid}, {"$set": {"sale_dealer_id": did}})
+        if not target.get("phone") and src.get("phone"):
+            await db.dealers.update_one({"_id": did}, {"$set": {"phone": src["phone"]}})
+            target["phone"] = src["phone"]
+        await db.dealers.delete_one({"_id": sid, "company_id": company})
+        merged += 1
+    return {"ok": True, "merged": merged, "summary": await _summary(did)}
 
 
 @router.post("/{did}/visit")
