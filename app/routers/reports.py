@@ -143,14 +143,24 @@ async def bills_report(frm: str = Query(alias="from"), to: str = Query(...), sou
 
 @router.get("/sales")
 async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: str = "", brand: str = "",
+                       dealer: str = "", model: str = "",
                        company=Depends(current_company), _=Depends(admin)):
     import re as _re
     query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
-    if brand:
-        query["brand"] = brand.upper()
     rx = _re.compile(_re.escape(q), _re.I) if q else None
+    bsel, dsel, msel = brand.strip().upper(), dealer.strip(), model.strip()
     rows, total, units, by_dealer, by_model = [], 0.0, 0, {}, {}
+    all_dealers, all_models, all_brands = set(), set(), set()
     async for s in db.sales.find(query).sort("date", -1):
+        if s.get("dealer_name"): all_dealers.add(s["dealer_name"])
+        if s.get("model"): all_models.add(s["model"])
+        if s.get("brand"): all_brands.add(s["brand"])
+        if bsel and (s.get("brand") or "").upper() != bsel:
+            continue
+        if dsel and (s.get("dealer_name") or "") != dsel:
+            continue
+        if msel and (s.get("model") or "") != msel:
+            continue
         if rx and not (rx.search(s.get("model") or "") or rx.search(s.get("dealer_name") or "") or rx.search(s.get("imei") or "")):
             continue
         amt = s.get("amount", 0); total += amt
@@ -163,13 +173,12 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
         d["amount"] += amt; d["qty"] += s.get("qty", 0) or 1
         m = by_model.setdefault(s.get("model") or "—", {"model": s.get("model") or "—", "brand": s.get("brand"), "amount": 0, "qty": 0})
         m["amount"] += amt; m["qty"] += s.get("qty", 0) or 1
-    brands = sorted(b for b in await db.sales.distinct("brand", {"company_id": company}) if b)
-    return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:1000],
-            "brands": brands,
+    return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:2000],
+            "dealers": sorted(all_dealers), "models": sorted(all_models), "brands": sorted(all_brands),
             "by_dealer": [{"dealer": k, "amount": round(v["amount"]), "qty": v["qty"]}
                           for k, v in sorted(by_dealer.items(), key=lambda x: -x[1]["amount"])],
             "by_model": [{"model": v["model"], "brand": v["brand"], "amount": round(v["amount"]), "qty": v["qty"]}
-                         for v in sorted(by_model.values(), key=lambda x: -x["qty"])][:50]}
+                         for v in sorted(by_model.values(), key=lambda x: -x["qty"])]}
 
 
 @router.get("/purchases-brand")
