@@ -21,6 +21,21 @@ async def lifespan(app: FastAPI):
         await db.pricelists.create_index("name")
         await db.bills.create_index("dealer_id")
         await db.payments.create_index("dealer_id")
+        # --- extra speed indexes (hot query paths) ---
+        await db.pricelists.create_index("company_id")
+        await db.bills.create_index([("company_id", 1), ("dealer_id", 1)])
+        await db.bills.create_index([("company_id", 1), ("date", 1)])
+        await db.payments.create_index([("company_id", 1), ("dealer_id", 1)])
+        await db.payments.create_index([("company_id", 1), ("date", 1)])
+        await db.visits.create_index([("company_id", 1), ("date", 1)])
+        await db.products.create_index([("pricelist_id", 1)])
+        await db.products.create_index([("company_id", 1)])
+        await db.sales.create_index([("company_id", 1), ("date", 1)])
+        await db.purchases.create_index([("company_id", 1)])
+        await db.stock_units.create_index([("company_id", 1), ("status", 1)])
+        await db.stock_units.create_index([("company_id", 1), ("imei", 1)])
+        await db.stock_lots.create_index([("company_id", 1)])
+        await db.import_batches.create_index([("company_id", 1)])
     except Exception:
         pass
     yield
