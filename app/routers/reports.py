@@ -383,3 +383,98 @@ async def top_performers(frm: str = Query(alias="from"), to: str = Query(...),
     top_skus = sorted([{**v, "amount": round(v["amount"])} for v in skus.values()], key=lambda x: -x["amount"])[:10]
     top_dealers = sorted([{**v, "amount": round(v["amount"])} for v in deal.values()], key=lambda x: -x["amount"])[:10]
     return {"from": frm, "to": to, "top_skus": top_skus, "top_dealers": top_dealers}
+
+
+@router.get("/beat")
+async def beat_report(frm: str = Query(alias="from"), to: str = Query(...),
+                      company=Depends(current_company), _=Depends(admin)):
+    """Collector accountability: per collector, assigned dealers vs visited, amount collected, cheques taken."""
+    # assigned dealers per collector
+    assigned = {}
+    dealer_name = {}
+    async for d in db.dealers.find({"company_id": company}):
+        dealer_name[d["_id"]] = d.get("name")
+        if d.get("collector_id"):
+            assigned[d["collector_id"]] = assigned.get(d["collector_id"], 0) + 1
+    # collectors
+    who = {}
+    async for u in db.users.find({"role": "collector"}):
+        if company in (u.get("company_ids") or []):
+            who[u["_id"]] = u.get("name")
+    # visits in range (distinct dealers per collector)
+    visits = {}
+    async for v in db.visits.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+        uid = v.get("user_id")
+        visits.setdefault(uid, {"name": v.get("user_name"), "dealers": set(), "count": 0})
+        visits[uid]["dealers"].add(v.get("dealer_id"))
+        visits[uid]["count"] += 1
+    # collections in range (approved, non-bounced) per collector
+    coll = {}
+    async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+        if p.get("approved", True) is False or p.get("status") == "bounced":
+            continue
+        cid = p.get("collector_id")
+        if not cid or cid == "seed":
+            continue
+        c = coll.setdefault(cid, {"amount": 0, "receipts": 0, "cheques": 0, "cheque_amt": 0})
+        c["amount"] += p.get("amount", 0) or 0
+        c["receipts"] += 1
+        if (p.get("mode") or "") == "Cheque":
+            c["cheques"] += 1
+            c["cheque_amt"] += p.get("amount", 0) or 0
+    ids = set(who) | set(visits) | set(coll)
+    rows = []
+    for uid in ids:
+        name = who.get(uid) or (visits.get(uid, {}) or {}).get("name") or "—"
+        v = visits.get(uid, {})
+        c = coll.get(uid, {})
+        rows.append({
+            "collector": name,
+            "assigned": assigned.get(uid, 0),
+            "visited": len(v.get("dealers", set())) if v else 0,
+            "visits": v.get("count", 0) if v else 0,
+            "collected": round(c.get("amount", 0)),
+            "receipts": c.get("receipts", 0),
+            "cheques": c.get("cheques", 0),
+            "cheque_amt": round(c.get("cheque_amt", 0)),
+        })
+    rows.sort(key=lambda r: -r["collected"])
+    tot = {"collected": sum(r["collected"] for r in rows), "receipts": sum(r["receipts"] for r in rows),
+           "visited": sum(r["visited"] for r in rows), "assigned": sum(r["assigned"] for r in rows),
+           "cheques": sum(r["cheques"] for r in rows)}
+    return {"from": frm, "to": to, "rows": rows, "totals": tot}
+
+
+@router.get("/followup")
+async def followup_report(min_days: int = 0, min_amount: float = 0, bucket: str = "",
+                          company=Depends(current_company), _=Depends(admin)):
+    """Who to chase today: dealers with outstanding, sorted by amount, with phone, oldest-due days,
+    last payment, and a per-bucket breakdown for a ready action list."""
+    dealers = [d async for d in db.dealers.find({"company_id": company})]
+    bills_by, pays_by = {}, {}
+    async for b in db.bills.find({"company_id": company}):
+        bills_by.setdefault(b["dealer_id"], []).append(b)
+    async for p in db.payments.find({"company_id": company}):
+        pays_by.setdefault(p["dealer_id"], []).append(p)
+    rows = []
+    for d in dealers:
+        bl = bills_by.get(d["_id"], []); pz = pays_by.get(d["_id"], [])
+        s = compute(bl, pz)
+        if s["outstanding"] <= 0:
+            continue
+        oldest = max((u["days"] for u in bill_breakdown(bl, pz)), default=0)
+        ag = s["ageing"]
+        if bucket and (ag.get(bucket, 0) or 0) <= 0:
+            continue
+        if oldest < min_days or s["outstanding"] < min_amount:
+            continue
+        rows.append({
+            "dealer": d["name"], "dealer_id": d["_id"], "area": d.get("area"), "phone": d.get("phone"),
+            "outstanding": s["outstanding"], "oldest_due": oldest,
+            "age_0_30": ag.get("age_0_30", 0), "age_31_60": ag.get("age_31_60", 0),
+            "age_61_90": ag.get("age_61_90", 0), "age_90p": ag.get("age_90p", 0),
+            "over_limit": bool(d.get("credit_limit") and s["outstanding"] > d.get("credit_limit", 0)),
+            "last_payment": s.get("last_payment"),
+        })
+    rows.sort(key=lambda r: (-r["oldest_due"], -r["outstanding"]))
+    return {"count": len(rows), "total": round(sum(r["outstanding"] for r in rows)), "rows": rows}
