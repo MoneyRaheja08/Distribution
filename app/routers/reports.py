@@ -331,6 +331,8 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
         receivables = total_receivables
         recv_est = False
 
+    from .reports2 import schemes_earned as _se
+    scheme = await _se(frm=frm, to=to, brand=bsel, company=company, _=None)
     ann_sales = revenue * factor
     ann_cogs = cogs * factor
     stock_days = (stock_value / ann_cogs * 365) if ann_cogs > 0 else 0
@@ -340,6 +342,7 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
             "revenue": round(revenue), "cogs": round(cogs), "gross": round(gross),
             "gross_margin_pct": round(gross / revenue * 100, 2) if revenue else 0,
             "units": units, "duplicates_ignored": dups, "rows": rows,
+            "scheme_earned": scheme["earned"], "scheme_count": scheme["schemes"],
             "by_month": [{"month": k, "sale": round(v["sale"]), "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])}
                          for k, v in sorted(by_month.items())],
             "stock_value": round(stock_value),
