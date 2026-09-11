@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, bill_breakdown, _parse
+from ..ledger import compute, bill_breakdown, _parse, brand_match
 from .reports import admin
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -74,7 +74,7 @@ async def _sales(company, frm, to, brand=""):
     q = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
     seen, out = set(), []
     async for s in db.sales.find(q).sort("created_at", 1):
-        if brand and (s.get("brand") or "").upper() != brand.upper():
+        if brand and not brand_match(s, brand):
             continue
         key = (s.get("bill_no"), s.get("imei")) if s.get("imei") else (s.get("bill_no"), s.get("model"), s.get("qty"), s.get("amount"))
         if key in seen:
@@ -495,7 +495,7 @@ async def scheme_achievement(company, month):
         qty = amt = 0.0
         pool = purchases if (sc.get("basis") or "purchase") == "purchase" else sales
         for s in pool:
-            if sc.get("brand") and (s.get("brand") or "").upper() != sc["brand"].upper():
+            if sc.get("brand") and not brand_match(s, sc["brand"]):
                 continue
             if sc.get("scope") == "group" and (s.get("group") or "") != sc.get("scope_value"):
                 continue

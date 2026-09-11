@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, bill_breakdown
+from ..ledger import compute, bill_breakdown, brand_match, brand_query
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -155,7 +155,7 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
         if s.get("dealer_name"): all_dealers.add(s["dealer_name"])
         if s.get("model"): all_models.add(s["model"])
         if s.get("brand"): all_brands.add(s["brand"])
-        if bsel and (s.get("brand") or "").upper() != bsel:
+        if bsel and not brand_match(s, bsel):
             continue
         if dsel and (s.get("dealer_name") or "") != dsel:
             continue
@@ -186,7 +186,7 @@ async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query
                                  company=Depends(current_company), _=Depends(admin)):
     query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
     if brand:
-        query["brand"] = brand.upper()
+        query.update(brand_query(brand))
     total, by_brand, by_month, by_cat = 0.0, {}, {}, {}
     async for p in db.purchases.find(query):
         amt = p.get("amount", 0); total += amt
@@ -205,7 +205,7 @@ async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), br
                         company=Depends(current_company), _=Depends(admin)):
     query = {"company_id": company, "status": "sold", "sale_date": {"$gte": frm, "$lte": to}}
     if brand:
-        query["brand"] = brand.upper()
+        query.update(brand_query(brand))
     by_model, tot_sale, tot_cost, units = {}, 0.0, 0.0, 0
     by_month = {}
     async for u in db.stock_units.find(query):
@@ -285,7 +285,7 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
             continue
         seen[key] = batch
         total_rev_all += amt
-        if bsel and bb != bsel:
+        if bsel and not brand_match(sdoc, bsel):
             if bb == "—":
                 dq["no_brand"] += 1; dq["no_brand_amount"] += amt
             else:
@@ -318,12 +318,12 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
     stock_value = 0.0
     su_q = {"company_id": company, "status": "in_stock"}
     if bsel:
-        su_q["brand"] = bsel
+        su_q.update(brand_query(bsel))
     async for u in db.stock_units.find(su_q, {"purchase_rate": 1}):
         stock_value += u.get("purchase_rate") or 0
     lot_q = {"company_id": company}
     if bsel:
-        lot_q["brand"] = bsel
+        lot_q.update(brand_query(bsel))
     async for lot in db.stock_lots.find(lot_q):
         avail = (lot.get("in_qty", 0) or 0) - (lot.get("sold_qty", 0) or 0)
         if avail > 0:

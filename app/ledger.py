@@ -72,3 +72,24 @@ def bill_breakdown(bills, payments, today=None):
                         "amount": round(amt), "unpaid": round(unpaid),
                         "days": days, "bucket": bucket_for(days)})
     return out
+
+
+def brand_match(doc, brand):
+    """Tolerant brand filter: 'HAIER' matches company 'HAIER APPLIANCES INDIA', group 'HAIER LED', model 'HAIER W/M ...'."""
+    if not brand:
+        return True
+    b = brand.strip().upper()
+    if not b:
+        return True
+    for k in ("brand", "group", "sub_group", "model", "supplier"):
+        v = (doc.get(k) or "").upper()
+        if b in v:
+            return True
+    return False
+
+
+def brand_query(brand):
+    """Mongo $or clause for the same tolerant match."""
+    import re
+    rx = {"$regex": re.escape(brand.strip().upper()), "$options": "i"}
+    return {"$or": [{"brand": rx}, {"group": rx}, {"model": rx}, {"supplier": rx}]}
