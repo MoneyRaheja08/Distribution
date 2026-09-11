@@ -42,12 +42,18 @@ async def record_collection(body: CollectIn, company=Depends(current_company), u
         raise HTTPException(400, f"Amount exceeds outstanding of {due:.0f}")
     if body.mode.value == "Cheque" and not (body.cheque or "").strip():
         raise HTTPException(400, "Cheque number/bank is required for cheque payments")
+    cheque_date = None
+    if body.mode.value == "Cheque" and body.cheque_date:
+        try:
+            cheque_date = date.fromisoformat(body.cheque_date[:10]).isoformat()
+        except ValueError:
+            raise HTTPException(400, "Cheque date must be YYYY-MM-DD")
     receipt = await _next_receipt()
     pending = body.mode.value == "Cheque"
     approved = user["role"] != "collector"   # collector payments need approval
     payment = {"_id": uuid.uuid4().hex, "dealer_id": dealer["_id"], "dealer_name": dealer["name"],
                "collector_id": user["_id"], "collector_name": user["name"], "amount": body.amount,
-               "mode": body.mode.value, "cheque": (body.cheque or "").strip(), "date": date.today().isoformat(),
+               "mode": body.mode.value, "cheque": (body.cheque or "").strip(), "cheque_date": cheque_date, "date": date.today().isoformat(),
                "ts": datetime.now(timezone.utc), "receipt": receipt,
                "status": "pending" if pending else "cleared", "deposited": False, "approved": approved,
                "approved_by": (user["name"] if approved else None), "reconciled": False, "company_id": company}
@@ -79,6 +85,8 @@ async def update_cheque(pid: str, body: ChequeUpdate, _=Depends(require_roles("a
         raise HTTPException(404, "Payment not found")
     if p["mode"] != "Cheque" or p["status"] != "pending":
         raise HTTPException(400, "Only pending cheques can be updated")
+    if body.cleared and p.get("cheque_date") and p["cheque_date"] > date.today().isoformat():
+        raise HTTPException(400, f"Post-dated cheque — can be cleared only on or after {p['cheque_date']}")
     await db.payments.update_one({"_id": pid}, {"$set": {"status": "cleared" if body.cleared else "bounced"}})
     return {"ok": True}
 

@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
 from ..ledger import compute, bill_breakdown, _parse
@@ -456,6 +457,7 @@ async def collector_efficiency(frm: str = Query(alias="from"), to: str = Query(.
 # 12. Scheme tracker ------------------------------------------------------------------------
 class SchemeIn(BaseModel):
     month: str
+    basis: str = "purchase"     # purchase (default: Haier pays on what you buy) | sale
     brand: str = ""
     scope: str = "all"          # all | group | model
     scope_value: str = ""
@@ -467,17 +469,32 @@ class SchemeIn(BaseModel):
     note: str = ""
 
 
+class SchemeStatus(BaseModel):
+    status: str                 # open | claimed | received
+    received_amount: float = 0
+    received_on: str = ""
+    note: str = ""
+
+
 def _scheme_pub(s):
     s = dict(s); s["id"] = s.pop("_id"); s.pop("company_id", None); return s
+
+
+async def _purchases(company, frm, to):
+    return [p async for p in db.purchases.find({"company_id": company, "date": {"$gte": frm, "$lte": to}})]
 
 
 async def scheme_achievement(company, month):
     a, b = _month_range(month)
     sales = await _sales(company, a, b)
+    purchases = await _purchases(company, a, b)
+    d1 = _parse(a); d2 = min(_parse(b), date.today())
+    progress = max(1, (d2 - d1).days + 1) / ((_parse(b) - d1).days + 1) * 100
     out = []
     async for sc in db.schemes.find({"company_id": company, "month": month}):
         qty = amt = 0.0
-        for s in sales:
+        pool = purchases if (sc.get("basis") or "purchase") == "purchase" else sales
+        for s in pool:
             if sc.get("brand") and (s.get("brand") or "").upper() != sc["brand"].upper():
                 continue
             if sc.get("scope") == "group" and (s.get("group") or "") != sc.get("scope_value"):
@@ -491,14 +508,24 @@ async def scheme_achievement(company, month):
             ach.append(qty / tq)
         if ta:
             ach.append(amt / ta)
+        no_target = not ach
         pct = min(ach) if ach else 1.0
-        full = sc.get("payout_amount", 0) + amt * (sc.get("payout_pct", 0) / 100)
-        earned = full if pct >= 1 else (full * pct if sc.get("prorata") else 0)
+        pct_income = amt * (sc.get("payout_pct", 0) / 100)          # % on purchase/sale value (always accrues)
+        full = sc.get("payout_amount", 0) + pct_income
+        if no_target:
+            earned = pct_income
+        else:
+            earned = full if pct >= 1 else (full * pct if sc.get("prorata") else pct_income * 0)
         gap_qty = max(0, tq - qty) if tq else 0
         gap_amt = max(0, ta - amt) if ta else 0
-        out.append({**_scheme_pub(sc), "actual_qty": int(qty), "actual_amount": round(amt), "achieved_pct": round(pct * 100, 1),
-                    "earned": round(earned), "potential": round(full if pct >= 1 else (sc.get("payout_amount", 0) + max(amt, ta) * sc.get("payout_pct", 0) / 100)),
-                    "gap_qty": gap_qty, "gap_amount": round(gap_amt), "met": pct >= 1})
+        behind = (not no_target) and pct < 1 and (pct * 100) < progress - 5
+        out.append({**_scheme_pub(sc), "basis": sc.get("basis") or "purchase", "status": sc.get("status") or "open",
+                    "received_amount": sc.get("received_amount") or 0, "received_on": sc.get("received_on"),
+                    "actual_qty": int(qty), "actual_amount": round(amt), "achieved_pct": round(pct * 100, 1),
+                    "pct_income": round(pct_income), "earned": round(earned),
+                    "potential": round(full if pct >= 1 else (sc.get("payout_amount", 0) + max(amt, ta) * sc.get("payout_pct", 0) / 100)),
+                    "gap_qty": gap_qty, "gap_amount": round(gap_amt), "met": no_target or pct >= 1, "no_target": no_target,
+                    "behind": behind, "needed_pace": round((pct * 100) - progress, 1)})
     return out
 
 
@@ -513,6 +540,8 @@ async def schemes_list(month: str = "", company=Depends(current_company), _=Depe
     models = sorted(m for m in await db.sales.distinct("model", {"company_id": company}) if m)
     brands = sorted(x for x in await db.sales.distinct("brand", {"company_id": company}) if x)
     return {"month": month, "rows": rows, "earned": sum(r["earned"] for r in rows), "potential": sum(r["potential"] for r in rows),
+            "received": sum(r["received_amount"] for r in rows), "behind": sum(1 for r in rows if r["behind"]),
+            "pending_claim": sum(r["earned"] for r in rows if r["status"] == "open" and r["earned"] > 0),
             "month_progress_pct": round(elapsed / total_days * 100), "groups": groups, "models": models, "brands": brands}
 
 
@@ -520,12 +549,28 @@ async def schemes_list(month: str = "", company=Depends(current_company), _=Depe
 async def scheme_create(body: SchemeIn, company=Depends(current_company), _=Depends(admin)):
     if len(body.month) != 7:
         raise HTTPException(400, "month must be YYYY-MM")
-    if not (body.target_qty or body.target_amount):
-        raise HTTPException(400, "Set a quantity or amount target")
+    if not (body.target_qty or body.target_amount or body.payout_pct or body.payout_amount):
+        raise HTTPException(400, "Set a target, or a % / flat payout")
+    if body.basis not in ("purchase", "sale"):
+        raise HTTPException(400, "basis must be purchase or sale")
     doc = {"_id": uuid.uuid4().hex, "company_id": company, **body.model_dump(), "brand": body.brand.upper(),
-           "created_at": datetime.now().isoformat()}
+           "status": "open", "received_amount": 0, "created_at": datetime.now().isoformat()}
     await db.schemes.insert_one(doc)
     return _scheme_pub(doc)
+
+
+@router.patch("/schemes/{sid}/status")
+async def scheme_status(sid: str, body: SchemeStatus, company=Depends(current_company), _=Depends(admin)):
+    if body.status not in ("open", "claimed", "received"):
+        raise HTTPException(400, "status must be open, claimed or received")
+    upd = {"status": body.status, "received_amount": body.received_amount if body.status == "received" else 0,
+           "received_on": (body.received_on or date.today().isoformat()) if body.status == "received" else None}
+    if body.note:
+        upd["status_note"] = body.note
+    r = await db.schemes.update_one({"_id": sid, "company_id": company}, {"$set": upd})
+    if not r.matched_count:
+        raise HTTPException(404, "Scheme not found")
+    return {"ok": True}
 
 
 @router.delete("/schemes/{sid}")
@@ -596,3 +641,84 @@ async def daily_digest(day: str = "", company=Depends(current_company), _=Depend
             "collections": {"amount": round(coll), "receipts": len(coll_rows), "rows": coll_rows[:10]},
             "outstanding": round(outstanding), "over90": round(over90), "top_overdue": top[:5],
             "low_stock": low[:8], "visits": visits, "new_dealers": new_dealers}
+
+
+# Admin dashboard ---------------------------------------------------------------------------
+async def dashboard_access(user=Depends(get_current_user)):
+    if user["role"] == "admin" or user.get("can_view_dashboard"):
+        return user
+    raise HTTPException(403, "You do not have dashboard access")
+
+
+@router.get("/dashboard")
+async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_access)):
+    today = date.today(); tiso = today.isoformat()
+    m_start = tiso[:7] + "-01"
+    dealers, bills_by, pays_by = await _ledger_ctx(company)
+    cost_of = await _cost_ctx(company)
+    # today & MTD sales
+    def agg(sales):
+        amt = sum(s.get("amount", 0) or 0 for s in sales); cost = sum(cost_of(s) for s in sales)
+        return {"amount": round(amt), "units": sum(1 if s.get("imei") else (s.get("qty") or 0) for s in sales), "margin": round(amt - cost),
+                "margin_pct": round((amt - cost) / amt * 100, 1) if amt else 0}
+    mtd_sales = await _sales(company, m_start, tiso)
+    today_sales = [s for s in mtd_sales if s.get("date") == tiso]
+    # collections today / MTD
+    coll_today = coll_mtd = 0.0
+    async for p in db.payments.find({"company_id": company, "date": {"$gte": m_start, "$lte": tiso}}):
+        if not _live(p) or p.get("collector_id") in (None, "seed"):
+            continue
+        coll_mtd += p.get("amount", 0) or 0
+        if p.get("date") == tiso:
+            coll_today += p.get("amount", 0) or 0
+    # outstanding + cash forecast (reuse cashflow)
+    cf = await cashflow_forecast(company=company, _=None)
+    outstanding = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["outstanding"] for d in dealers)
+    over90 = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["ageing"]["age_90p"] for d in dealers)
+    # slowing dealers
+    tr = await credit_trend(months=6, company=company, _=None)
+    slowing = [{"name": r["name"], "latest": r["latest"], "change": r["change"], "outstanding": r["outstanding"]} for r in tr["rows"] if r["flag"] == "warning"][:5]
+    # inactive
+    ina = await inactive_dealers(days=30, company=company, _=None)
+    # schemes
+    sch = await schemes_list(month=tiso[:7], company=company, _=None)
+    # low stock (from digest logic)
+    dg = await daily_digest(day=tiso, company=company, _=None)
+    # pending approvals & cheques
+    pending_appr = await db.payments.count_documents({"company_id": company, "approved": False})
+    cheques = []
+    async for p in db.payments.find({"company_id": company, "mode": "Cheque", "status": "pending"}):
+        cheques.append({"dealer": p.get("dealer_name"), "amount": round(p.get("amount", 0) or 0), "cheque": p.get("cheque"),
+                        "cheque_date": p.get("cheque_date"), "due": (p.get("cheque_date") or p.get("date") or "") <= tiso})
+    cheques.sort(key=lambda c: c["cheque_date"] or c.get("date") or "")
+    due_today = [c for c in cheques if c["cheque_date"] == tiso]
+    overdue = [c for c in cheques if c["cheque_date"] and c["cheque_date"] < tiso]
+    scheme_alerts = [{"label": (r.get("brand") or "All") + " · " + (r["scope_value"] if r.get("scope") != "all" else "All models"),
+                      "achieved_pct": r["achieved_pct"], "gap_qty": r["gap_qty"], "gap_amount": r["gap_amount"],
+                      "potential": r["potential"], "basis": r["basis"]} for r in sch["rows"] if r["behind"]]
+    # stock value
+    stock_value = 0.0; stock_units = 0
+    async for u in db.stock_units.find({"company_id": company, "status": "in_stock"}, {"purchase_rate": 1}):
+        stock_value += u.get("purchase_rate") or 0; stock_units += 1
+    top_dealers_mtd = {}
+    for s in mtd_sales:
+        top_dealers_mtd[s.get("dealer_name") or "—"] = top_dealers_mtd.get(s.get("dealer_name") or "—", 0) + (s.get("amount", 0) or 0)
+    return {"date": tiso,
+            "today": {"sales": agg(today_sales), "collections": round(coll_today)},
+            "mtd": {"sales": agg(mtd_sales), "collections": round(coll_mtd),
+                    "top_dealers": sorted([{"dealer": k, "amount": round(v)} for k, v in top_dealers_mtd.items()], key=lambda x: -x["amount"])[:5]},
+            "outstanding": round(outstanding), "over90": round(over90),
+            "forecast": {"week1": cf["weeks"][0]["amount"], "next30": cf["next30"], "at_risk": cf["at_risk"]},
+            "slowing": slowing, "slowing_count": tr["warnings"],
+            "inactive": {"count": ina["count"], "regular_lost": ina["regular_lost"], "lost_revenue": ina["lost_revenue"],
+                         "rows": [{"name": r["name"], "days_since": r["days_since"], "run_rate": r["monthly_run_rate"]} for r in ina["rows"][:5]]},
+            "schemes": {"earned": sch["earned"], "potential": sch["potential"], "progress": sch["month_progress_pct"],
+                        "rows": [{"label": (r.get("brand") or "All") + " · " + (r["scope_value"] if r.get("scope") != "all" else "All models"),
+                                  "achieved_pct": r["achieved_pct"], "met": r["met"], "behind": r["behind"], "basis": r["basis"], "gap_qty": r["gap_qty"], "gap_amount": r["gap_amount"]} for r in sch["rows"]],
+                        "alerts": scheme_alerts},
+            "cheque_alerts": {"due_today": due_today, "overdue": overdue, "due_today_total": sum(c["amount"] for c in due_today), "overdue_total": sum(c["amount"] for c in overdue)},
+            "low_stock": dg["low_stock"][:6],
+            "stock": {"value": round(stock_value), "units": stock_units},
+            "pending_approvals": pending_appr,
+            "cheques": {"due": sum(c["amount"] for c in cheques if c["due"]), "future": sum(c["amount"] for c in cheques if not c["due"]), "rows": cheques[:6]},
+            "top_overdue": dg["top_overdue"][:5]}

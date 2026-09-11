@@ -38,6 +38,7 @@ def public_user(u):
         "can_collect": u.get("can_collect", False),
         "can_import_statement": u.get("can_import_statement", False),
         "can_view_reports": u.get("can_view_reports", False),
+        "can_view_dashboard": u.get("can_view_dashboard", False),
         "company_ids": u.get("company_ids", []),
     }
 
@@ -72,6 +73,7 @@ def public_payment(p):
         "amount": p["amount"],
         "mode": p["mode"],
         "cheque": p.get("cheque"),
+        "cheque_date": p.get("cheque_date"),
         "date": p["date"],
         "receipt": p["receipt"],
         "status": p["status"],

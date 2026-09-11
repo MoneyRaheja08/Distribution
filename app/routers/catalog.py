@@ -1,5 +1,6 @@
 import csv
 import io
+from html.parser import HTMLParser
 import re
 import uuid
 from datetime import datetime, timezone, date, timedelta
@@ -77,17 +78,76 @@ def _num(v, default=0.0):
         return default
 
 
-def _parse_csv(data: bytes, fmt="dmy"):
-    """Parse a MARG-style sale/purchase CSV (skips any title preamble)."""
+def _cell(v):
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    if isinstance(v, (datetime, date)):
+        return v.strftime("%d-%m-%Y")
+    return str(v)
+
+
+class _TableParser(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.rows, self.row, self.cell, self.in_cell = [], None, [], False
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr": self.row = []
+        elif tag in ("td", "th"): self.in_cell, self.cell = True, []
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self.row is not None:
+            self.row.append("".join(self.cell).strip()); self.in_cell = False
+        elif tag == "tr" and self.row is not None:
+            self.rows.append(self.row); self.row = None
+    def handle_data(self, d):
+        if self.in_cell: self.cell.append(d)
+
+
+def _html_rows(text):
+    p = _TableParser(); p.feed(text)
+    if not p.rows:
+        raise HTTPException(400, "Could not read this file. Save it as .xlsx or .csv and retry")
+    return p.rows
+
+
+def _read_rows(data: bytes):
+    """CSV / XLSX / XLS -> list of rows (all cells as strings)."""
+    if data[:4] == b"PK\x03\x04":                       # xlsx (zip)
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        ws = wb.worksheets[0]
+        return [[_cell(c) for c in r] for r in ws.iter_rows(values_only=True)]
+    if data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":   # legacy xls (OLE2)
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=data)
+        sh = wb.sheet_by_index(0)
+        out = []
+        for i in range(sh.nrows):
+            row = []
+            for j in range(sh.ncols):
+                c = sh.cell(i, j)
+                if c.ctype == xlrd.XL_CELL_DATE:
+                    row.append(datetime(*xlrd.xldate_as_tuple(c.value, wb.datemode)).strftime("%d-%m-%Y"))
+                else:
+                    row.append(_cell(c.value))
+            out.append(row)
+        return out
     text = data.decode("utf-8-sig", errors="replace")
-    rows = list(csv.reader(io.StringIO(text)))
+    if text.lstrip().startswith("<"):                    # HTML table saved as .xls by MARG
+        return _html_rows(text)
+    return list(csv.reader(io.StringIO(text)))
+
+
+def _parse_csv(data: bytes, fmt="dmy"):
+    """Parse a MARG-style sale/purchase file (CSV/XLSX/XLS; skips any title preamble)."""
+    rows = _read_rows(data)
     hidx = None
     for i, r in enumerate(rows):
         if r and r[0].strip().upper().rstrip(".") == "BILL NO":
             hidx = i
             break
     if hidx is None:
-        raise HTTPException(400, "Could not find a header row (BILL NO.) in this CSV")
+        raise HTTPException(400, "Could not find a header row (BILL NO.) in this file")
     header = [c.strip().upper().rstrip(".") for c in rows[hidx]]
     idx = {h: i for i, h in enumerate(header)}
 

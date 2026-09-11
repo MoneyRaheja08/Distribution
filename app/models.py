@@ -45,6 +45,7 @@ class UserIn(BaseModel):
     can_collect: bool = False
     can_import_statement: bool = False
     can_view_reports: bool = False
+    can_view_dashboard: bool = False
     company_ids: list[str] = []
 
 
@@ -56,6 +57,7 @@ class UserPatch(BaseModel):
     can_collect: Optional[bool] = None
     can_import_statement: Optional[bool] = None
     can_view_reports: Optional[bool] = None
+    can_view_dashboard: Optional[bool] = None
     company_ids: Optional[list[str]] = None
 
 
@@ -97,6 +99,7 @@ class CollectIn(BaseModel):
     amount: float = Field(gt=0)
     mode: Mode = Mode.cash
     cheque: Optional[str] = None
+    cheque_date: Optional[str] = None   # post-dated cheque (YYYY-MM-DD)
 
 
 class ChequeUpdate(BaseModel):
