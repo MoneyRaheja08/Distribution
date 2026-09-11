@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from ..auth import get_current_user, require_roles
 from ..db import db
 from ..deps import current_company
+from ..ledger import sale_key
 
 router = APIRouter(tags=["catalog"])
 staff_only = require_roles("admin", "manager")
@@ -593,3 +594,42 @@ async def aging_stock(days: int = 60, company=Depends(current_company), _=Depend
                      "purchase_date": pd, "days": age, "purchase_rate": round(u.get("purchase_rate") or 0)})
     rows.sort(key=lambda x: -(x["days"] or 0))
     return {"days": days, "count": len(rows), "value": round(sum(r["purchase_rate"] for r in rows)), "rows": rows}
+
+
+# ---------------- Duplicate sale lines (from re-imported files) ----------------
+async def _find_dup_sales(company):
+    seen, dups = {}, []
+    async for s in db.sales.find({"company_id": company}).sort("created_at", 1):
+        k = sale_key(s); bt = s.get("import_batch") or ""
+        if k in seen and seen[k] != bt:
+            dups.append(s)
+            continue
+        seen.setdefault(k, bt)
+    return dups
+
+
+@router.get("/import/duplicates")
+async def duplicate_sales(company=Depends(current_company), _=Depends(staff_only)):
+    dups = await _find_dup_sales(company)
+    by_batch = {}
+    for d in dups:
+        b = by_batch.setdefault(d.get("import_batch") or "—", {"lines": 0, "amount": 0.0})
+        b["lines"] += 1; b["amount"] += d.get("amount", 0) or 0
+    return {"lines": len(dups), "amount": round(sum(d.get("amount", 0) or 0 for d in dups)),
+            "by_batch": [{"batch": k, **{kk: (round(vv) if isinstance(vv, float) else vv) for kk, vv in v.items()}} for k, v in by_batch.items()]}
+
+
+@router.post("/import/duplicates/remove")
+async def remove_duplicate_sales(company=Depends(current_company), _=Depends(require_roles("admin"))):
+    """Delete re-imported duplicate sale lines (keeps the first import). Non-serial lines also
+    roll back the extra sold_qty on the stock lot."""
+    dups = await _find_dup_sales(company)
+    lot_fix = {}
+    for d in dups:
+        if not d.get("imei"):
+            k = (d.get("brand"), d.get("model")); lot_fix[k] = lot_fix.get(k, 0) + (d.get("qty") or 0)
+    for (b, m), q in lot_fix.items():
+        await db.stock_lots.update_one({"company_id": company, "brand": b, "model": m}, {"$inc": {"sold_qty": -q}})
+    if dups:
+        await db.sales.delete_many({"_id": {"$in": [d["_id"] for d in dups]}})
+    return {"removed": len(dups), "amount": round(sum(d.get("amount", 0) or 0 for d in dups)), "lots_fixed": len(lot_fix)}

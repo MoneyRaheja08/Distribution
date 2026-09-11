@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, bill_breakdown, brand_match, brand_query
+from ..ledger import compute, bill_breakdown, brand_match, brand_query, sale_key
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -151,7 +151,13 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
     bsel, dsel, msel = brand.strip().upper(), dealer.strip(), model.strip()
     rows, total, units, by_dealer, by_model = [], 0.0, 0, {}, {}
     all_dealers, all_models, all_brands = set(), set(), set()
-    async for s in db.sales.find(query).sort("date", -1):
+    seen, dups = {}, 0
+    async for s in db.sales.find(query).sort([("date", -1), ("created_at", 1)]):
+        k = sale_key(s); bt = s.get("import_batch") or ""
+        if k in seen and seen[k] != bt:
+            dups += 1
+            continue
+        seen[k] = bt
         if s.get("dealer_name"): all_dealers.add(s["dealer_name"])
         if s.get("model"): all_models.add(s["model"])
         if s.get("brand"): all_brands.add(s["brand"])
@@ -173,7 +179,7 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
         d["amount"] += amt; d["qty"] += s.get("qty", 0) or 1
         m = by_model.setdefault(s.get("model") or "—", {"model": s.get("model") or "—", "brand": s.get("brand"), "amount": 0, "qty": 0})
         m["amount"] += amt; m["qty"] += s.get("qty", 0) or 1
-    return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:2000],
+    return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:2000], "duplicates_ignored": dups,
             "dealers": sorted(all_dealers), "models": sorted(all_models), "brands": sorted(all_brands),
             "by_dealer": [{"dealer": k, "amount": round(v["amount"]), "qty": v["qty"]}
                           for k, v in sorted(by_dealer.items(), key=lambda x: -x[1]["amount"])],

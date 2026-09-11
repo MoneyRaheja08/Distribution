@@ -93,3 +93,10 @@ def brand_query(brand):
     import re
     rx = {"$regex": re.escape(brand.strip().upper()), "$options": "i"}
     return {"$or": [{"brand": rx}, {"group": rx}, {"model": rx}, {"supplier": rx}]}
+
+
+def sale_key(s):
+    """Identity of a sale line: same bill + IMEI (or bill+model+qty+amount for non-serial lines)."""
+    if s.get("imei"):
+        return (s.get("bill_no"), s.get("imei"))
+    return (s.get("bill_no"), s.get("model"), s.get("qty"), s.get("amount"))
