@@ -265,11 +265,18 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
     revenue = cogs = total_rev_all = 0.0
     units = dups = 0
     seen, by_model, by_month = {}, {}, {}
+    dq = {"no_date": 0, "no_date_amount": 0.0, "other_brand": 0, "other_brand_amount": 0.0, "no_brand": 0, "no_brand_amount": 0.0,
+          "no_cost_units": 0, "no_cost_amount": 0.0, "unmatched_dealer": 0, "unmatched_dealer_amount": 0.0,
+          "stock_units_no_cost": 0, "total_lines_all": 0}
+    async for sdoc in db.sales.find({"company_id": company, "$or": [{"date": None}, {"date": ""}]}):
+        dq["no_date"] += 1; dq["no_date_amount"] += sdoc.get("amount", 0) or 0
+    dq["stock_units_no_cost"] = await db.stock_units.count_documents({"company_id": company, "status": "in_stock", "$or": [{"purchase_rate": None}, {"purchase_rate": 0}]})
     async for sdoc in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}).sort("created_at", 1):
         amt = sdoc.get("amount", 0) or 0
         bb = (sdoc.get("brand") or "—").strip().upper()
         model = sdoc.get("model") or "—"
         brands_seen.add(bb)
+        dq["total_lines_all"] += 1
         # same line re-imported in another batch → count once
         key = (sdoc.get("bill_no"), sdoc.get("imei")) if sdoc.get("imei") else (sdoc.get("bill_no"), model, sdoc.get("qty"), amt)
         batch = sdoc.get("import_batch") or ""
@@ -279,6 +286,10 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
         seen[key] = batch
         total_rev_all += amt
         if bsel and bb != bsel:
+            if bb == "—":
+                dq["no_brand"] += 1; dq["no_brand_amount"] += amt
+            else:
+                dq["other_brand"] += 1; dq["other_brand_amount"] += amt
             continue
         revenue += amt
         if sdoc.get("imei"):
@@ -287,6 +298,10 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
         else:
             q = sdoc.get("qty", 0) or 0
             c = q * avg_cost(bb, model)
+        if c <= 0 and amt > 0:
+            dq["no_cost_units"] += q; dq["no_cost_amount"] += amt
+        if not sdoc.get("dealer_id"):
+            dq["unmatched_dealer"] += 1; dq["unmatched_dealer_amount"] += amt
         units += q; cogs += c
         m = by_model.setdefault(model, {"model": model, "brand": bb, "qty": 0, "sale": 0.0, "cost": 0.0})
         m["qty"] += q; m["sale"] += amt; m["cost"] += c
@@ -340,6 +355,7 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
             "revenue": round(revenue), "cogs": round(cogs), "gross": round(gross),
             "gross_margin_pct": round(gross / revenue * 100, 2) if revenue else 0,
             "units": units, "duplicates_ignored": dups, "rows": rows,
+            "data_check": {k: (round(v) if isinstance(v, float) else v) for k, v in dq.items()},
             "by_month": [{"month": k, "sale": round(v["sale"]), "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])}
                          for k, v in sorted(by_month.items())],
             "stock_value": round(stock_value),
