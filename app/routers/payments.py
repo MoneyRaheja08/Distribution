@@ -146,7 +146,8 @@ async def reconcile_payment(pid: str, body: ReconcileIn, _=Depends(require_roles
 
 @router.get("/summary")
 async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
-    dealers = [d async for d in db.dealers.find({"company_id": company})]
+    dealers = [d async for d in db.dealers.find({"company_id": company, "show_on_overview": {"$ne": False}})]
+    hidden_count = await db.dealers.count_documents({"company_id": company, "show_on_overview": False})
     bills_by, pays_by = {}, {}
     async for b in db.bills.find({"company_id": company}):
         bills_by.setdefault(b["dealer_id"], []).append(b)
@@ -192,7 +193,7 @@ async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
         dd = (today_d - timedelta(days=i)).isoformat()
         daily.append({"date": dd, "amount": sum(p["amount"] for p in field_pays if p["date"] == dd and p["status"] != "bounced")})
     top_overdue = sorted(overdue_rows, key=lambda r: (-r["oldest_due"], -r["outstanding"]))[:8]
-    return {"total_outstanding": total_out, "over_90_days": over90, "collected_today": collected_today,
+    return {"hidden_dealers": hidden_count, "total_outstanding": total_out, "over_90_days": over90, "collected_today": collected_today,
             "collected_week": collected_week, "collected_month": collected_month, "daily": daily,
             "top_overdue": top_overdue, "ageing": ageing_total, "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending,
             "pending_approvals": pending_count, "per_collector": per_collector}

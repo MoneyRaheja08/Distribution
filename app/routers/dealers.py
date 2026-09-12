@@ -131,7 +131,7 @@ async def dealer_ledger(did: str, company=Depends(current_company), user=Depends
 async def create_dealer(body: DealerIn, opening_balance: float = 0, company=Depends(current_company), _=Depends(staff_only)):
     did = uuid.uuid4().hex
     d = {"_id": did, "name": body.name.strip(), "area": body.area, "phone": body.phone,
-         "credit_limit": body.credit_limit, "collector_id": body.collector_id, "company_id": company}
+         "credit_limit": body.credit_limit, "collector_id": body.collector_id, "show_on_overview": body.show_on_overview, "company_id": company}
     await db.dealers.insert_one(d)
     if opening_balance and opening_balance > 0:
         await db.bills.insert_one({"_id": uuid.uuid4().hex, "dealer_id": did, "bill_no": "Opening",
@@ -142,7 +142,7 @@ async def create_dealer(body: DealerIn, opening_balance: float = 0, company=Depe
 @router.patch("/{did}")
 async def update_dealer(did: str, body: DealerPatch, company=Depends(current_company), _=Depends(staff_only)):
     upd = {}
-    for f in ("name", "area", "phone", "credit_limit", "collector_id"):
+    for f in ("name", "area", "phone", "credit_limit", "collector_id", "show_on_overview"):
         v = getattr(body, f)
         if v is not None:
             upd[f] = v.strip() if f == "name" else v

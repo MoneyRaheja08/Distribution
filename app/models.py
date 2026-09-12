@@ -74,6 +74,7 @@ class DealerIn(BaseModel):
     phone: Optional[str] = None
     credit_limit: float = 0
     collector_id: Optional[str] = None
+    show_on_overview: bool = True
     ageing: Ageing = Field(default_factory=Ageing)
 
 
@@ -83,6 +84,7 @@ class DealerPatch(BaseModel):
     phone: Optional[str] = None
     credit_limit: Optional[float] = None
     collector_id: Optional[str] = None
+    show_on_overview: Optional[bool] = None
     ageing: Optional[Ageing] = None
 
 

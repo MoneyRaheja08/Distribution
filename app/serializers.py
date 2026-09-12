@@ -55,6 +55,7 @@ def public_dealer(d, summary=None, visited_today=False):
         "phone": d.get("phone"),
         "credit_limit": d.get("credit_limit", 0),
         "collector_id": d.get("collector_id"),
+        "show_on_overview": d.get("show_on_overview", True),
         "ageing": summary["ageing"],
         "outstanding": summary["outstanding"],
         "last_payment": summary["last_payment"],

@@ -737,8 +737,10 @@ async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_
             coll_today += p.get("amount", 0) or 0
     # outstanding + cash forecast (reuse cashflow)
     cf = await cashflow_forecast(company=company, _=None)
-    outstanding = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["outstanding"] for d in dealers)
-    over90 = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["ageing"]["age_90p"] for d in dealers)
+    shown = [d for d in dealers if dealers[d].get("show_on_overview", True) is not False]
+    outstanding = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["outstanding"] for d in shown)
+    over90 = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["ageing"]["age_90p"] for d in shown)
+    hidden_dealers = len(dealers) - len(shown)
     # slowing dealers
     tr = await credit_trend(months=6, company=company, _=None)
     slowing = [{"name": r["name"], "latest": r["latest"], "change": r["change"], "outstanding": r["outstanding"]} for r in tr["rows"] if r["flag"] == "warning"][:5]
@@ -771,7 +773,7 @@ async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_
             "today": {"sales": agg(today_sales), "collections": round(coll_today)},
             "mtd": {"sales": agg(mtd_sales), "collections": round(coll_mtd),
                     "top_dealers": sorted([{"dealer": k, "amount": round(v)} for k, v in top_dealers_mtd.items()], key=lambda x: -x["amount"])[:5]},
-            "outstanding": round(outstanding), "over90": round(over90),
+            "outstanding": round(outstanding), "over90": round(over90), "hidden_dealers": hidden_dealers,
             "forecast": {"week1": cf["weeks"][0]["amount"], "next30": cf["next30"], "at_risk": cf["at_risk"]},
             "slowing": slowing, "slowing_count": tr["warnings"],
             "inactive": {"count": ina["count"], "regular_lost": ina["regular_lost"], "lost_revenue": ina["lost_revenue"],
