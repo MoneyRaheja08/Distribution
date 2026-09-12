@@ -38,8 +38,7 @@ async def create_user(body: UserIn, _=Depends(admin_only)):
     u = {"_id": uid, "name": body.name.strip(), "pin_hash": hash_pin(body.pin),
          "role": body.role.value, "price_list_access": body.price_list_access,
          "can_collect": body.can_collect, "can_import_statement": body.can_import_statement,
-         "can_view_reports": body.can_view_reports, "can_view_dashboard": body.can_view_dashboard, "can_view_sales": body.can_view_sales,
-         "can_view_profit": body.can_view_profit, "can_view_digest": body.can_view_digest, "company_ids": body.company_ids}
+         "can_view_reports": body.can_view_reports, "can_view_dashboard": body.can_view_dashboard, "company_ids": body.company_ids}
     await db.users.insert_one(u)
     return public_user(u)
 
@@ -63,9 +62,6 @@ async def update_user(uid: str, body: UserPatch, _=Depends(admin_only)):
         upd["can_view_reports"] = body.can_view_reports
     if body.can_view_dashboard is not None:
         upd["can_view_dashboard"] = body.can_view_dashboard
-    for k in ("can_view_sales", "can_view_profit", "can_view_digest"):
-        if getattr(body, k) is not None:
-            upd[k] = getattr(body, k)
     if body.company_ids is not None:
         upd["company_ids"] = body.company_ids
     if not upd:

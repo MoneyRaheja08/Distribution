@@ -100,9 +100,3 @@ def sale_key(s):
     if s.get("imei"):
         return (s.get("bill_no"), s.get("imei"))
     return (s.get("bill_no"), s.get("model"), s.get("qty"), s.get("amount"))
-
-
-def purchase_key(p):
-    if p.get("imei"):
-        return (p.get("bill_no"), p.get("imei"))
-    return (p.get("bill_no"), p.get("model"), p.get("qty"), p.get("amount"))

@@ -46,9 +46,6 @@ class UserIn(BaseModel):
     can_import_statement: bool = False
     can_view_reports: bool = False
     can_view_dashboard: bool = False
-    can_view_sales: bool = False
-    can_view_profit: bool = False
-    can_view_digest: bool = False
     company_ids: list[str] = []
 
 
@@ -61,9 +58,6 @@ class UserPatch(BaseModel):
     can_import_statement: Optional[bool] = None
     can_view_reports: Optional[bool] = None
     can_view_dashboard: Optional[bool] = None
-    can_view_sales: Optional[bool] = None
-    can_view_profit: Optional[bool] = None
-    can_view_digest: Optional[bool] = None
     company_ids: Optional[list[str]] = None
 
 

@@ -7,8 +7,8 @@ from pydantic import BaseModel
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, bill_breakdown, _parse, brand_match, sale_key, purchase_key
-from .reports import admin, sales_perm, profit_perm, digest_perm
+from ..ledger import compute, bill_breakdown, _parse, brand_match
+from .reports import admin
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -86,7 +86,7 @@ async def _sales(company, frm, to, brand=""):
 # 4. Dealer scorecard 2.0 -------------------------------------------------------------
 @router.get("/dealer-scorecard")
 async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
-                           company=Depends(current_company), _=Depends(profit_perm)):
+                           company=Depends(current_company), _=Depends(admin)):
     dealers, bills_by, pays_by = await _ledger_ctx(company)
     cost_of = await _cost_ctx(company)
     by_name = {d["name"].strip().lower(): did for did, d in dealers.items() if d.get("name")}
@@ -198,7 +198,7 @@ async def credit_trend(months: int = 6, company=Depends(current_company), _=Depe
 
 # 6. Lost / inactive dealers ----------------------------------------------------------------
 @router.get("/inactive-dealers")
-async def inactive_dealers(days: int = 30, company=Depends(current_company), _=Depends(sales_perm)):
+async def inactive_dealers(days: int = 30, company=Depends(current_company), _=Depends(admin)):
     dealers, bills_by, pays_by = await _ledger_ctx(company)
     today = date.today()
     rows = []
@@ -241,7 +241,7 @@ def _shift(mo, k):
 
 
 @router.get("/mom")
-async def month_on_month(month: str = "", by: str = "brand", company=Depends(current_company), _=Depends(sales_perm)):
+async def month_on_month(month: str = "", by: str = "brand", company=Depends(current_company), _=Depends(admin)):
     month = month or date.today().strftime("%Y-%m")
     cost_of = await _cost_ctx(company)
     key = {"brand": "brand", "group": "group", "dealer": "dealer_name", "model": "model"}.get(by, "brand")
@@ -280,7 +280,7 @@ async def month_on_month(month: str = "", by: str = "brand", company=Depends(cur
 # 8. Category mix ----------------------------------------------------------------------------
 @router.get("/category-mix")
 async def category_mix(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
-                       company=Depends(current_company), _=Depends(profit_perm)):
+                       company=Depends(current_company), _=Depends(admin)):
     cost_of = await _cost_ctx(company)
     cats, tot_sale, tot_cost, brands = {}, 0.0, 0.0, set()
     for s in await _sales(company, frm, to, brand):
@@ -307,7 +307,7 @@ async def category_mix(frm: str = Query(alias="from"), to: str = Query(...), bra
 # 9. Price realisation -----------------------------------------------------------------------
 @router.get("/price-realisation")
 async def price_realisation(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
-                            company=Depends(current_company), _=Depends(profit_perm)):
+                            company=Depends(current_company), _=Depends(admin)):
     cost_of = await _cost_ctx(company)
     models = {}
     for s in await _sales(company, frm, to, brand):
@@ -457,8 +457,6 @@ async def collector_efficiency(frm: str = Query(alias="from"), to: str = Query(.
 # 12. Scheme tracker ------------------------------------------------------------------------
 class SchemeIn(BaseModel):
     month: str
-    date_from: str = ""         # optional custom period (overrides month)
-    date_to: str = ""
     basis: str = "purchase"     # purchase (default: Haier pays on what you buy) | sale
     brand: str = ""
     scope: str = "all"          # all | group | model
@@ -482,79 +480,20 @@ def _scheme_pub(s):
     s = dict(s); s["id"] = s.pop("_id"); s.pop("company_id", None); return s
 
 
-async def _purchases(company, frm, to, brand=""):
-    seen, out = {}, []
-    async for p in db.purchases.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}).sort("created_at", 1):
-        k = purchase_key(p); bt = p.get("import_batch") or ""
-        if k in seen and seen[k] != bt:
-            continue
-        seen[k] = bt
-        if brand and not brand_match(p, brand):
-            continue
-        out.append(p)
-    return out
-
-
-# Purchase report ---------------------------------------------------------------------------
-@router.get("/purchases")
-async def purchases_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "", supplier: str = "",
-                           model: str = "", group: str = "", q: str = "",
-                           company=Depends(current_company), _=Depends(sales_perm)):
-    import re as _re
-    rx = _re.compile(_re.escape(q), _re.I) if q else None
-    rows, total, units = [], 0.0, 0
-    by_supplier, by_model, by_bill, by_group = {}, {}, {}, {}
-    suppliers, models, groups, brands = set(), set(), set(), set()
-    sold_imeis = {u["imei"] async for u in db.stock_units.find({"company_id": company, "status": "sold"}, {"imei": 1})}
-    for p in await _purchases(company, frm, to):
-        if p.get("supplier"): suppliers.add(p["supplier"])
-        if p.get("model"): models.add(p["model"])
-        if p.get("group"): groups.add(p["group"])
-        if p.get("brand"): brands.add(p["brand"])
-        if brand and not brand_match(p, brand): continue
-        if supplier and (p.get("supplier") or "") != supplier: continue
-        if model and (p.get("model") or "") != model: continue
-        if group and (p.get("group") or "") != group: continue
-        if rx and not (rx.search(p.get("model") or "") or rx.search(p.get("bill_no") or "") or rx.search(p.get("imei") or "") or rx.search(p.get("supplier") or "")): continue
-        amt = p.get("amount", 0) or 0; qty = 1 if p.get("imei") else (p.get("qty") or 0)
-        total += amt; units += qty
-        sold = bool(p.get("imei") and p["imei"] in sold_imeis)
-        rows.append({"date": p.get("date"), "bill_no": p.get("bill_no"), "supplier": p.get("supplier"), "brand": p.get("brand"),
-                     "group": p.get("group"), "model": p.get("model"), "imei": p.get("imei"), "qty": qty, "rate": round(p.get("rate", 0) or 0),
-                     "amount": round(amt), "sold": sold})
-        s_ = by_supplier.setdefault(p.get("supplier") or "—", {"supplier": p.get("supplier") or "—", "amount": 0.0, "qty": 0, "bills": set()})
-        s_["amount"] += amt; s_["qty"] += qty; s_["bills"].add(p.get("bill_no"))
-        m_ = by_model.setdefault(p.get("model") or "—", {"model": p.get("model") or "—", "brand": p.get("brand"), "amount": 0.0, "qty": 0, "sold": 0})
-        m_["amount"] += amt; m_["qty"] += qty; m_["sold"] += 1 if sold else 0
-        b_ = by_bill.setdefault(p.get("bill_no") or "—", {"bill_no": p.get("bill_no") or "—", "date": p.get("date"), "supplier": p.get("supplier"), "amount": 0.0, "qty": 0, "lines": 0})
-        b_["amount"] += amt; b_["qty"] += qty; b_["lines"] += 1
-        g_ = by_group.setdefault(p.get("group") or "Other", {"group": p.get("group") or "Other", "amount": 0.0, "qty": 0})
-        g_["amount"] += amt; g_["qty"] += qty
-    rows.sort(key=lambda r: (r["date"] or "", r["bill_no"] or ""), reverse=True)
-    return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "bills": len(by_bill), "rows": rows[:2000],
-            "suppliers": sorted(suppliers), "models": sorted(models), "groups": sorted(groups), "brands": sorted(brands),
-            "by_supplier": sorted([{**v, "amount": round(v["amount"]), "bills": len(v["bills"])} for v in by_supplier.values()], key=lambda x: -x["amount"]),
-            "by_model": sorted([{**v, "amount": round(v["amount"]), "avg_rate": round(v["amount"] / v["qty"]) if v["qty"] else 0} for v in by_model.values()], key=lambda x: -x["amount"]),
-            "by_bill": sorted([{**v, "amount": round(v["amount"])} for v in by_bill.values()], key=lambda x: (x["date"] or ""), reverse=True),
-            "by_group": sorted([{**v, "amount": round(v["amount"])} for v in by_group.values()], key=lambda x: -x["amount"])}
+async def _purchases(company, frm, to):
+    return [p async for p in db.purchases.find({"company_id": company, "date": {"$gte": frm, "$lte": to}})]
 
 
 async def scheme_achievement(company, month):
-    ma, mb = _month_range(month)
-    cache = {}
-
-    async def pool_for(a, b, basis):
-        key = (a, b, basis)
-        if key not in cache:
-            cache[key] = await (_purchases(company, a, b) if basis == "purchase" else _sales(company, a, b))
-        return cache[key]
+    a, b = _month_range(month)
+    sales = await _sales(company, a, b)
+    purchases = await _purchases(company, a, b)
+    d1 = _parse(a); d2 = min(_parse(b), date.today())
+    progress = max(1, (d2 - d1).days + 1) / ((_parse(b) - d1).days + 1) * 100
     out = []
-    async for sc in db.schemes.find({"company_id": company, "$or": [{"month": month}, {"date_from": {"$lte": mb, "$ne": ""}, "date_to": {"$gte": ma}}]}):
-        a, b = (sc["date_from"], sc["date_to"]) if sc.get("date_from") and sc.get("date_to") else (ma, mb)
-        d1 = _parse(a); d2 = min(_parse(b), date.today())
-        progress = max(1, (d2 - d1).days + 1) / max(1, (_parse(b) - d1).days + 1) * 100
+    async for sc in db.schemes.find({"company_id": company, "month": month}):
         qty = amt = 0.0
-        pool = await pool_for(a, b, sc.get("basis") or "purchase")
+        pool = purchases if (sc.get("basis") or "purchase") == "purchase" else sales
         for s in pool:
             if sc.get("brand") and not brand_match(s, sc["brand"]):
                 continue
@@ -580,8 +519,7 @@ async def scheme_achievement(company, month):
         gap_qty = max(0, tq - qty) if tq else 0
         gap_amt = max(0, ta - amt) if ta else 0
         behind = (not no_target) and pct < 1 and (pct * 100) < progress - 5
-        out.append({**_scheme_pub(sc), "period_from": a, "period_to": b, "period_progress_pct": round(progress),
-                    "basis": sc.get("basis") or "purchase", "status": sc.get("status") or "open",
+        out.append({**_scheme_pub(sc), "basis": sc.get("basis") or "purchase", "status": sc.get("status") or "open",
                     "received_amount": sc.get("received_amount") or 0, "received_on": sc.get("received_on"),
                     "actual_qty": int(qty), "actual_amount": round(amt), "achieved_pct": round(pct * 100, 1),
                     "pct_income": round(pct_income), "earned": round(earned),
@@ -592,7 +530,7 @@ async def scheme_achievement(company, month):
 
 
 @router.get("/schemes")
-async def schemes_list(month: str = "", company=Depends(current_company), _=Depends(profit_perm)):
+async def schemes_list(month: str = "", company=Depends(current_company), _=Depends(admin)):
     month = month or date.today().strftime("%Y-%m")
     rows = await scheme_achievement(company, month)
     a, b = _month_range(month)
@@ -611,8 +549,6 @@ async def schemes_list(month: str = "", company=Depends(current_company), _=Depe
 async def scheme_create(body: SchemeIn, company=Depends(current_company), _=Depends(admin)):
     if len(body.month) != 7:
         raise HTTPException(400, "month must be YYYY-MM")
-    if (body.date_from or body.date_to) and not (body.date_from and body.date_to and body.date_from <= body.date_to):
-        raise HTTPException(400, "Give both a start and end date")
     if not (body.target_qty or body.target_amount or body.payout_pct or body.payout_amount):
         raise HTTPException(400, "Set a target, or a % / flat payout")
     if body.basis not in ("purchase", "sale"):
@@ -662,7 +598,7 @@ async def schemes_earned(frm: str = Query(alias="from"), to: str = Query(...), b
 
 # 13. Daily digest ---------------------------------------------------------------------------
 @router.get("/digest")
-async def daily_digest(day: str = "", company=Depends(current_company), _=Depends(digest_perm)):
+async def daily_digest(day: str = "", company=Depends(current_company), _=Depends(admin)):
     day = day or (date.today() - timedelta(days=1)).isoformat()
     dealers, bills_by, pays_by = await _ledger_ctx(company)
     sales = await _sales(company, day, day)
