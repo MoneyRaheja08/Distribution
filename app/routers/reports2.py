@@ -788,3 +788,67 @@ async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_
             "pending_approvals": pending_appr,
             "cheques": {"due": sum(c["amount"] for c in cheques if c["due"]), "future": sum(c["amount"] for c in cheques if not c["due"]), "rows": cheques[:6]},
             "top_overdue": dg["top_overdue"][:5]}
+
+
+# Stock planner ------------------------------------------------------------------------------
+@router.get("/stock-planner")
+async def stock_planner(brand: str = "", lead_days: int = 7, cover_days: int = 30,
+                        company=Depends(current_company), _=Depends(sales_perm)):
+    import math
+    today = date.today(); tiso = today.isoformat()
+    d7 = (today - timedelta(days=6)).isoformat(); d30 = (today - timedelta(days=29)).isoformat()
+    sku = {}
+
+    def row(b, m):
+        return sku.setdefault((b or "—", m or "—"), {"brand": b or "—", "model": m or "—", "stock": 0, "sold_7": 0, "sold_30": 0,
+                                                     "last_sale": None, "stock_value": 0.0})
+    async for u in db.stock_units.find({"company_id": company, "status": "in_stock"}, {"brand": 1, "model": 1, "purchase_rate": 1}):
+        r = row(u.get("brand"), u.get("model")); r["stock"] += 1; r["stock_value"] += u.get("purchase_rate") or 0
+    async for lot in db.stock_lots.find({"company_id": company}):
+        left = (lot.get("in_qty", 0) or 0) - (lot.get("sold_qty", 0) or 0)
+        if left > 0:
+            r = row(lot.get("brand"), lot.get("model")); r["stock"] += left; r["stock_value"] += left * (lot.get("avg_rate") or lot.get("rate") or 0)
+    for s in await _sales(company, d30, tiso):
+        r = row(s.get("brand"), s.get("model")); q = 1 if s.get("imei") else (s.get("qty") or 0)
+        r["sold_30"] += q
+        if (s.get("date") or "") >= d7: r["sold_7"] += q
+    # last sale date for anything still in stock but not sold in 30 d
+    async for s in db.sales.aggregate([{"$match": {"company_id": company}}, {"$group": {"_id": {"b": "$brand", "m": "$model"}, "last": {"$max": "$date"}}}]):
+        k = (s["_id"]["b"] or "—", s["_id"]["m"] or "—")
+        if k in sku: sku[k]["last_sale"] = s["last"]
+    out = []
+    for r in sku.values():
+        if brand and not brand_match(r, brand): continue
+        if r["stock"] <= 0 and r["sold_30"] <= 0: continue
+        avg = r["sold_30"] / 30
+        days_left = (r["stock"] / avg) if avg > 0 else None
+        target = math.ceil(avg * (lead_days + cover_days))
+        rec = max(0, target - r["stock"]) if avg > 0 else 0
+        if r["sold_30"] == 0:
+            action, order = "SLOW MOVING", 4
+        elif r["stock"] == 0 or days_left <= lead_days:
+            action, order = "ORDER NOW", 0
+        elif days_left <= lead_days + 7:
+            action, order = "ORDER SOON", 1
+        elif days_left > 90:
+            action, order = "OVERSTOCK", 3
+        else:
+            action, order = "NO ORDER", 2
+        if order > 1:
+            rec = 0
+        out.append({**r, "stock_value": round(r["stock_value"]), "avg_daily": round(avg, 2), "days_left": (round(days_left) if days_left is not None else None),
+                    "recommended": rec, "action": action, "_o": order,
+                    "days_since_sale": ((today - _parse(r["last_sale"])).days if r["last_sale"] else None)})
+    out.sort(key=lambda x: (x["_o"], x["days_left"] if x["days_left"] is not None else 10**6, -x["sold_30"]))
+    for x in out: x.pop("_o")
+    moving = [x for x in out if x["sold_30"] > 0]
+    fastest = sorted(moving, key=lambda x: (-x["sold_7"], -x["sold_30"]))[:10]
+    lowest = sorted(moving, key=lambda x: (x["days_left"] if x["days_left"] is not None else 10**6))[:10]
+    to_order = sorted([x for x in out if x["recommended"] > 0], key=lambda x: (-x["recommended"] * (x["avg_daily"] or 0)))[:10]
+    counts = {a: sum(1 for x in out if x["action"] == a) for a in ("ORDER NOW", "ORDER SOON", "NO ORDER", "OVERSTOCK", "SLOW MOVING")}
+    brands = sorted({x["brand"] for x in sku.values() if x["brand"] != "—"})
+    return {"as_of": tiso, "lead_days": lead_days, "cover_days": cover_days, "rows": out, "fastest": fastest, "lowest": lowest, "to_order": to_order,
+            "counts": counts, "brands": brands, "total_stock": sum(x["stock"] for x in out), "total_value": sum(x["stock_value"] for x in out),
+            "order_units": sum(x["recommended"] for x in out),
+            "slow_value": sum(x["stock_value"] for x in out if x["action"] == "SLOW MOVING"),
+            "over_value": sum(x["stock_value"] for x in out if x["action"] == "OVERSTOCK")}
