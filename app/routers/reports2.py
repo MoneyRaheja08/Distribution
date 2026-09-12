@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -87,8 +88,18 @@ async def _sales(company, frm, to, brand=""):
 @router.get("/dealer-scorecard")
 async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
                            company=Depends(current_company), _=Depends(profit_perm)):
-    dealers, bills_by, pays_by = await _ledger_ctx(company)
-    cost_of = await _cost_ctx(company)
+    # Run all independent, read-only sub-queries concurrently (was serial -> ~3.6s).
+    (dealers, bills_by, pays_by), cost_of, mtd_sales, cf, tr, ina, sch, dg, pending_appr = await asyncio.gather(
+        _ledger_ctx(company),
+        _cost_ctx(company),
+        _sales(company, m_start, tiso),
+        cashflow_forecast(company=company, _=None),
+        credit_trend(months=6, company=company, _=None),
+        inactive_dealers(days=30, company=company, _=None),
+        schemes_list(month=tiso[:7], company=company, _=None),
+        daily_digest(day=tiso, company=company, _=None),
+        db.payments.count_documents({"company_id": company, "approved": False}),
+    )
     by_name = {d["name"].strip().lower(): did for did, d in dealers.items() if d.get("name")}
     margin, revenue_cat = {}, {}
     for s in await _sales(company, frm, to):
@@ -718,14 +729,23 @@ async def dashboard_access(user=Depends(get_current_user)):
 async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_access)):
     today = date.today(); tiso = today.isoformat()
     m_start = tiso[:7] + "-01"
-    dealers, bills_by, pays_by = await _ledger_ctx(company)
-    cost_of = await _cost_ctx(company)
+    # Run all independent, read-only sub-queries concurrently (was serial -> ~3.6s).
+    (dealers, bills_by, pays_by), cost_of, mtd_sales, cf, tr, ina, sch, dg, pending_appr = await asyncio.gather(
+        _ledger_ctx(company),
+        _cost_ctx(company),
+        _sales(company, m_start, tiso),
+        cashflow_forecast(company=company, _=None),
+        credit_trend(months=6, company=company, _=None),
+        inactive_dealers(days=30, company=company, _=None),
+        schemes_list(month=tiso[:7], company=company, _=None),
+        daily_digest(day=tiso, company=company, _=None),
+        db.payments.count_documents({"company_id": company, "approved": False}),
+    )
     # today & MTD sales
     def agg(sales):
         amt = sum(s.get("amount", 0) or 0 for s in sales); cost = sum(cost_of(s) for s in sales)
         return {"amount": round(amt), "units": sum(1 if s.get("imei") else (s.get("qty") or 0) for s in sales), "margin": round(amt - cost),
                 "margin_pct": round((amt - cost) / amt * 100, 1) if amt else 0}
-    mtd_sales = await _sales(company, m_start, tiso)
     today_sales = [s for s in mtd_sales if s.get("date") == tiso]
     # collections today / MTD
     coll_today = coll_mtd = 0.0
@@ -736,22 +756,16 @@ async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_
         if p.get("date") == tiso:
             coll_today += p.get("amount", 0) or 0
     # outstanding + cash forecast (reuse cashflow)
-    cf = await cashflow_forecast(company=company, _=None)
     shown = [d for d in dealers if dealers[d].get("show_on_overview", True) is not False]
     outstanding = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["outstanding"] for d in shown)
     over90 = sum(compute(bills_by.get(d, []), pays_by.get(d, []))["ageing"]["age_90p"] for d in shown)
     hidden_dealers = len(dealers) - len(shown)
     # slowing dealers
-    tr = await credit_trend(months=6, company=company, _=None)
     slowing = [{"name": r["name"], "latest": r["latest"], "change": r["change"], "outstanding": r["outstanding"]} for r in tr["rows"] if r["flag"] == "warning"][:5]
     # inactive
-    ina = await inactive_dealers(days=30, company=company, _=None)
     # schemes
-    sch = await schemes_list(month=tiso[:7], company=company, _=None)
     # low stock (from digest logic)
-    dg = await daily_digest(day=tiso, company=company, _=None)
     # pending approvals & cheques
-    pending_appr = await db.payments.count_documents({"company_id": company, "approved": False})
     cheques = []
     async for p in db.payments.find({"company_id": company, "mode": "Cheque", "status": "pending"}):
         cheques.append({"dealer": p.get("dealer_name"), "amount": round(p.get("amount", 0) or 0), "cheque": p.get("cheque"),
