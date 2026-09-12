@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from ..auth import get_current_user, require_roles
 from ..db import db
 from ..deps import current_company
-from ..ledger import sale_key
+from ..ledger import sale_key, purchase_key
 
 router = APIRouter(tags=["catalog"])
 staff_only = require_roles("admin", "manager")
@@ -385,6 +385,10 @@ async def purchase_preview(file: UploadFile = File(...), date_format: str = "aut
     if imeis:
         async for u in db.stock_units.find({"company_id": company, "imei": {"$in": imeis}}, {"imei": 1}):
             dup.add(u["imei"])
+    bill_nos = list({l["bill_no"] for l in lines})
+    existing_keys = {purchase_key(p) async for p in db.purchases.find({"company_id": company, "bill_no": {"$in": bill_nos}})}
+    dup_lines = [l for l in lines if purchase_key(l) in existing_keys]
+    dup_bills = sorted({l["bill_no"] for l in dup_lines})
     dates = [l["date"] for l in lines if l["date"]]
     cats = {}
     for l in lines:
@@ -397,6 +401,8 @@ async def purchase_preview(file: UploadFile = File(...), date_format: str = "aut
             "summary": {"lines": len(lines), "imei_units": len(imeis),
                         "qty_only": sum(l["qty"] for l in lines if not l["imei"]),
                         "total": round(sum(l["amount"] for l in lines), 2), "duplicates": len(dup),
+                        "already_imported_lines": len(dup_lines), "already_imported_amount": round(sum(l["amount"] for l in dup_lines), 2),
+                        "already_imported_bills": dup_bills[:10], "new_lines": len(lines) - len(dup_lines),
                         "date_from": min(dates) if dates else None, "date_to": max(dates) if dates else None},
             "categories": sorted([{**c, "amount": round(c["amount"], 2)} for c in cats.values()],
                                  key=lambda x: -x["amount"])}
@@ -420,9 +426,17 @@ async def purchase_commit(file: UploadFile = File(...), date_format: str = "dmy"
         async for u in db.stock_units.find({"company_id": company, "imei": {"$in": imeis}}, {"imei": 1}):
             existing.add(u["imei"])
     units_added = dupes = qty_added = 0
+    bill_nos = list({l["bill_no"] for l in lines})
+    existing_keys = {purchase_key(p) async for p in db.purchases.find({"company_id": company, "bill_no": {"$in": bill_nos}})}
+    skipped_lines = 0
     lot_in = {}
     unit_docs, purchase_docs = [], []
     for l in lines:
+        k = purchase_key(l)
+        if k in existing_keys:
+            skipped_lines += 1
+            continue
+        existing_keys.add(k)
         purchase_docs.append({"_id": uuid.uuid4().hex, "company_id": company, "brand": l["brand"], "group": l["group"],
                               "sub_group": l["sub_group"], "model": l["model"], "godown": l["godown"], "qty": l["qty"],
                               "rate": l["rate"], "amount": l["amount"], "imei": l["imei"] or None,
@@ -457,10 +471,10 @@ async def purchase_commit(file: UploadFile = File(...), date_format: str = "dmy"
         "brand": lines[0]["brand"] if lines else "", "filename": file.filename,
         "created_at": now, "undone": False,
         "lot_in": [{"brand": b, "model": m, "qty": q} for (b, m), q in lot_in.items()],
-        "counts": {"units_added": units_added, "qty_added": qty_added, "duplicates": dupes,
+        "counts": {"units_added": units_added, "qty_added": qty_added, "duplicates": dupes, "skipped_already_imported": skipped_lines,
                    "purchase_lines": len(purchase_docs)}})
     return {"ok": True, "batch_id": batch_id, "units_added": units_added, "qty_added": qty_added,
-            "duplicates": dupes, "purchase_lines": len(purchase_docs)}
+            "duplicates": dupes, "skipped_already_imported": skipped_lines, "purchase_lines": len(purchase_docs)}
 
 
 # ---------------- Import batches (undo) ----------------

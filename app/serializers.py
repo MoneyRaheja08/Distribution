@@ -39,6 +39,9 @@ def public_user(u):
         "can_import_statement": u.get("can_import_statement", False),
         "can_view_reports": u.get("can_view_reports", False),
         "can_view_dashboard": u.get("can_view_dashboard", False),
+        "can_view_sales": u.get("can_view_sales", False),
+        "can_view_profit": u.get("can_view_profit", False),
+        "can_view_digest": u.get("can_view_digest", False),
         "company_ids": u.get("company_ids", []),
     }
 
