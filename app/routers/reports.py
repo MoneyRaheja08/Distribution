@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, bill_breakdown, brand_match, brand_query, sale_key
+from ..ledger import compute, bill_breakdown, brand_match, brand_query, sale_key, purchase_key
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -16,6 +16,19 @@ async def admin(user=Depends(get_current_user)):
     if user["role"] == "admin" or user.get("can_view_reports"):
         return user
     raise HTTPException(403, "You do not have reports access")
+
+
+def _perm(field, label):
+    async def dep(user=Depends(get_current_user)):
+        if user["role"] == "admin" or (user.get("can_view_reports") and user.get(field)):
+            return user
+        raise HTTPException(403, f"You do not have access to {label} reports")
+    return dep
+
+
+sales_perm = _perm("can_view_sales", "sales")
+profit_perm = _perm("can_view_profit", "profit")
+digest_perm = _perm("can_view_digest", "digest")
 
 
 def _live(p):
@@ -144,7 +157,7 @@ async def bills_report(frm: str = Query(alias="from"), to: str = Query(...), sou
 @router.get("/sales")
 async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: str = "", brand: str = "",
                        dealer: str = "", model: str = "",
-                       company=Depends(current_company), _=Depends(admin)):
+                       company=Depends(current_company), _=Depends(sales_perm)):
     import re as _re
     query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
     rx = _re.compile(_re.escape(q), _re.I) if q else None
@@ -189,12 +202,17 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
 
 @router.get("/purchases-brand")
 async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
-                                 company=Depends(current_company), _=Depends(admin)):
+                                 company=Depends(current_company), _=Depends(sales_perm)):
     query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
     if brand:
         query.update(brand_query(brand))
     total, by_brand, by_month, by_cat = 0.0, {}, {}, {}
-    async for p in db.purchases.find(query):
+    seen = {}
+    async for p in db.purchases.find(query).sort("created_at", 1):
+        k = purchase_key(p); bt = p.get("import_batch") or ""
+        if k in seen and seen[k] != bt:
+            continue
+        seen[k] = bt
         amt = p.get("amount", 0); total += amt
         qty = p.get("qty", 0) or 1
         b = by_brand.setdefault(p.get("brand") or "—", {"amount": 0, "qty": 0}); b["amount"] += amt; b["qty"] += qty
@@ -208,7 +226,7 @@ async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query
 
 @router.get("/profit")
 async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
-                        company=Depends(current_company), _=Depends(admin)):
+                        company=Depends(current_company), _=Depends(profit_perm)):
     query = {"company_id": company, "status": "sold", "sale_date": {"$gte": frm, "$lte": to}}
     if brand:
         query.update(brand_query(brand))
@@ -236,7 +254,7 @@ async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), br
 
 @router.get("/profit2")
 async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
-                         company=Depends(current_company), _=Depends(admin)):
+                         company=Depends(current_company), _=Depends(profit_perm)):
     """Real working-capital & return model, per brand. Revenue, COGS, gross margin and
     stock value come from the imported Sale/Purchase catalog for the chosen brand.
     Receivables aren't stored per brand, so when a brand is picked they are shown as an
@@ -393,18 +411,34 @@ async def brand_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
 
 
 @router.get("/top-performers")
-async def top_performers(frm: str = Query(alias="from"), to: str = Query(...),
-                         company=Depends(current_company), _=Depends(admin)):
+async def top_performers(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "", group: str = "",
+                         dealer: str = "", limit: int = 10,
+                         company=Depends(current_company), _=Depends(sales_perm)):
     skus, deal = {}, {}
-    async for s in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+    seen, brands, groups, dealers = {}, set(), set(), set()
+    async for s in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}).sort("created_at", 1):
+        k = sale_key(s); bt = s.get("import_batch") or ""
+        if k in seen and seen[k] != bt:
+            continue
+        seen[k] = bt
+        if s.get("brand"): brands.add(s["brand"])
+        if s.get("group"): groups.add(s["group"])
+        if s.get("dealer_name"): dealers.add(s["dealer_name"])
+        if brand and not brand_match(s, brand):
+            continue
+        if group and (s.get("group") or "") != group:
+            continue
+        if dealer and (s.get("dealer_name") or "") != dealer:
+            continue
         amt = s.get("amount", 0); qty = s.get("qty", 0) or 1
         k = s.get("model") or "—"
         x = skus.setdefault(k, {"model": k, "brand": s.get("brand"), "amount": 0, "qty": 0}); x["amount"] += amt; x["qty"] += qty
         dn = s.get("dealer_name") or "—"
         y = deal.setdefault(dn, {"dealer": dn, "amount": 0, "qty": 0}); y["amount"] += amt; y["qty"] += qty
-    top_skus = sorted([{**v, "amount": round(v["amount"])} for v in skus.values()], key=lambda x: -x["amount"])[:10]
-    top_dealers = sorted([{**v, "amount": round(v["amount"])} for v in deal.values()], key=lambda x: -x["amount"])[:10]
-    return {"from": frm, "to": to, "top_skus": top_skus, "top_dealers": top_dealers}
+    top_skus = sorted([{**v, "amount": round(v["amount"])} for v in skus.values()], key=lambda x: -x["amount"])[:limit]
+    top_dealers = sorted([{**v, "amount": round(v["amount"])} for v in deal.values()], key=lambda x: -x["amount"])[:limit]
+    return {"from": frm, "to": to, "top_skus": top_skus, "top_dealers": top_dealers,
+            "brands": sorted(brands), "groups": sorted(groups), "dealers": sorted(dealers)}
 
 
 @router.get("/beat")
