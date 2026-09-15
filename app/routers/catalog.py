@@ -7,7 +7,7 @@ from datetime import datetime, timezone, date, timedelta
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
-from ..auth import get_current_user, require_roles
+from ..auth import get_current_user, require_roles, is_staff
 from ..db import db
 from ..deps import current_company
 from ..ledger import sale_key, purchase_key
@@ -617,7 +617,7 @@ async def model_history(model: str, company=Depends(current_company), _=Depends(
 
 
 @router.get("/catalog/stock-summary")
-async def stock_summary(company=Depends(current_company), _=Depends(get_current_user)):
+async def stock_summary(company=Depends(current_company), user=Depends(get_current_user)):
     rows = []
     pipeline = [{"$match": {"company_id": company}},
                 {"$group": {"_id": {"model": "$model", "brand": "$brand", "group": "$group"},
@@ -631,6 +631,10 @@ async def stock_summary(company=Depends(current_company), _=Depends(get_current_
                      "total": l.get("in_qty", 0), "available": l.get("in_qty", 0) - l.get("sold_qty", 0),
                      "tracked": "qty"})
     rows.sort(key=lambda x: (x["brand"] or "", x["model"] or ""))
+    brands = sorted({r["brand"] for r in rows if r["brand"]})
+    # Collectors see availability only — never cost valuation.
+    if not is_staff(user):
+        return {"rows": rows, "brands": brands, "valuation": [], "total_value": 0}
     val = {}
     async for u in db.stock_units.find({"company_id": company, "status": "in_stock"}):
         v = val.setdefault(u.get("brand") or "—", {"brand": u.get("brand") or "—", "units": 0, "value": 0.0})
@@ -638,7 +642,7 @@ async def stock_summary(company=Depends(current_company), _=Depends(get_current_
         v["value"] += (u.get("purchase_rate") or 0)
     valuation = [{"brand": x["brand"], "units": x["units"], "value": round(x["value"])}
                  for x in sorted(val.values(), key=lambda x: -x["value"])]
-    return {"rows": rows, "brands": sorted({r["brand"] for r in rows if r["brand"]}),
+    return {"rows": rows, "brands": brands,
             "valuation": valuation, "total_value": round(sum(x["value"] for x in val.values()))}
 
 
