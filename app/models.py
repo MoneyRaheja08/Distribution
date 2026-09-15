@@ -236,8 +236,11 @@ class CompanyPatch(BaseModel):
 class OrderItem(BaseModel):
     model: str
     description: Optional[str] = ""
+    brand: Optional[str] = ""
     dp: float = 0
     qty: float = Field(gt=0)
+    billed_units: Optional[float] = 0   # units of this model already billed to the dealer
+    billed_value: Optional[float] = 0   # ₹ value of those already-billed units
 
 
 class OrderIn(BaseModel):

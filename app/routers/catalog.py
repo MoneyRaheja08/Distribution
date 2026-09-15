@@ -565,6 +565,51 @@ async def imei_lookup(imei: str, company=Depends(current_company), _=Depends(get
     return u
 
 
+@router.get("/catalog/model-history")
+async def model_history(model: str, company=Depends(current_company), _=Depends(get_current_user)):
+    """Full purchase + sale history and current stock for one model (Tap-to-track)."""
+    model = (model or "").strip()
+    if not model:
+        raise HTTPException(400, "model is required")
+    brand = None
+    total = avail = 0
+    async for u in db.stock_units.find({"company_id": company, "model": model}):
+        total += 1
+        if u.get("status") == "in_stock":
+            avail += 1
+        brand = brand or u.get("brand")
+    async for l in db.stock_lots.find({"company_id": company, "model": model}):
+        total += l.get("in_qty", 0) or 0
+        avail += (l.get("in_qty", 0) or 0) - (l.get("sold_qty", 0) or 0)
+        brand = brand or l.get("brand")
+    seenp, purchases = set(), []
+    async for p in db.purchases.find({"company_id": company, "model": model}).sort("date", -1):
+        k = purchase_key(p)
+        if k in seenp:
+            continue
+        seenp.add(k)
+        brand = brand or p.get("brand")
+        purchases.append({"date": p.get("date"), "bill_no": p.get("bill_no"), "party": p.get("supplier"),
+                          "qty": p.get("qty") or 0, "rate": round(p.get("rate") or 0),
+                          "amount": round(p.get("amount") or 0), "imei": p.get("imei")})
+    seens, sales = set(), []
+    async for s in db.sales.find({"company_id": company, "model": model}).sort("date", -1):
+        k = sale_key(s)
+        if k in seens:
+            continue
+        seens.add(k)
+        brand = brand or s.get("brand")
+        sales.append({"date": s.get("date"), "bill_no": s.get("bill_no"), "party": s.get("dealer_name"),
+                      "qty": s.get("qty") or 0, "rate": round(s.get("rate") or 0),
+                      "amount": round(s.get("amount") or 0), "imei": s.get("imei")})
+    pu = sum(1 if p["imei"] else (p["qty"] or 0) for p in purchases)
+    su = sum(1 if s["imei"] else (s["qty"] or 0) for s in sales)
+    return {"model": model, "brand": brand, "available": avail, "total": total,
+            "purchased": {"units": int(pu), "value": round(sum(p["amount"] for p in purchases))},
+            "sold": {"units": int(su), "value": round(sum(s["amount"] for s in sales))},
+            "purchases": purchases[:300], "sales": sales[:300]}
+
+
 @router.get("/catalog/stock-summary")
 async def stock_summary(company=Depends(current_company), _=Depends(get_current_user)):
     rows = []

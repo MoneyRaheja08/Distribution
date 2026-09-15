@@ -88,17 +88,10 @@ async def _sales(company, frm, to, brand=""):
 @router.get("/dealer-scorecard")
 async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
                            company=Depends(current_company), _=Depends(profit_perm)):
-    # Run all independent, read-only sub-queries concurrently (was serial -> ~3.6s).
-    (dealers, bills_by, pays_by), cost_of, mtd_sales, cf, tr, ina, sch, dg, pending_appr = await asyncio.gather(
+    # Run the independent, read-only sub-queries concurrently.
+    (dealers, bills_by, pays_by), cost_of = await asyncio.gather(
         _ledger_ctx(company),
         _cost_ctx(company),
-        _sales(company, m_start, tiso),
-        cashflow_forecast(company=company, _=None),
-        credit_trend(months=6, company=company, _=None),
-        inactive_dealers(days=30, company=company, _=None),
-        schemes_list(month=tiso[:7], company=company, _=None),
-        daily_digest(day=tiso, company=company, _=None),
-        db.payments.count_documents({"company_id": company, "approved": False}),
     )
     by_name = {d["name"].strip().lower(): did for did, d in dealers.items() if d.get("name")}
     margin, revenue_cat = {}, {}
@@ -473,7 +466,8 @@ class SchemeIn(BaseModel):
     basis: str = "purchase"     # purchase (default: Haier pays on what you buy) | sale
     brand: str = ""
     scope: str = "all"          # all | group | model
-    scope_value: str = ""
+    scope_value: str = ""       # single value (a group, or one model — kept for back-compat)
+    scope_values: list[str] = []  # multiple models when scope == model
     target_qty: int = 0
     target_amount: float = 0
     payout_pct: float = 0       # % of achieved sale value, paid when target met
@@ -571,8 +565,10 @@ async def scheme_achievement(company, month):
                 continue
             if sc.get("scope") == "group" and (s.get("group") or "") != sc.get("scope_value"):
                 continue
-            if sc.get("scope") == "model" and (s.get("model") or "") != sc.get("scope_value"):
-                continue
+            if sc.get("scope") == "model":
+                vals = sc.get("scope_values") or ([sc["scope_value"]] if sc.get("scope_value") else [])
+                if (s.get("model") or "") not in vals:
+                    continue
             qty += 1 if s.get("imei") else (s.get("qty") or 0); amt += s.get("amount", 0) or 0
         tq, ta = sc.get("target_qty") or 0, sc.get("target_amount") or 0
         ach = []
@@ -591,7 +587,15 @@ async def scheme_achievement(company, month):
         gap_qty = max(0, tq - qty) if tq else 0
         gap_amt = max(0, ta - amt) if ta else 0
         behind = (not no_target) and pct < 1 and (pct * 100) < progress - 5
+        if sc.get("scope") == "all":
+            scope_label = "All models"
+        elif sc.get("scope") == "group":
+            scope_label = sc.get("scope_value") or "—"
+        else:
+            _vals = sc.get("scope_values") or ([sc["scope_value"]] if sc.get("scope_value") else [])
+            scope_label = ", ".join(_vals) if _vals else "—"
         out.append({**_scheme_pub(sc), "period_from": a, "period_to": b, "period_progress_pct": round(progress),
+                    "scope_label": scope_label,
                     "basis": sc.get("basis") or "purchase", "status": sc.get("status") or "open",
                     "received_amount": sc.get("received_amount") or 0, "received_on": sc.get("received_on"),
                     "actual_qty": int(qty), "actual_amount": round(amt), "achieved_pct": round(pct * 100, 1),
@@ -609,9 +613,13 @@ async def schemes_list(month: str = "", company=Depends(current_company), _=Depe
     a, b = _month_range(month)
     d1 = _parse(a); d2 = min(_parse(b), date.today())
     elapsed = max(1, (d2 - d1).days + 1); total_days = (_parse(b) - d1).days + 1
-    groups = sorted(g for g in await db.sales.distinct("group", {"company_id": company}) if g)
-    models = sorted(m for m in await db.sales.distinct("model", {"company_id": company}) if m)
-    brands = sorted(x for x in await db.sales.distinct("brand", {"company_id": company}) if x)
+    # Models/categories/brands can be scheme-tracked on PURCHASES too, so union sales + purchases
+    groups = sorted({g for g in (await db.sales.distinct("group", {"company_id": company})
+                                 + await db.purchases.distinct("group", {"company_id": company})) if g})
+    models = sorted({m for m in (await db.sales.distinct("model", {"company_id": company})
+                                 + await db.purchases.distinct("model", {"company_id": company})) if m})
+    brands = sorted({x for x in (await db.sales.distinct("brand", {"company_id": company})
+                                 + await db.purchases.distinct("brand", {"company_id": company})) if x})
     return {"month": month, "rows": rows, "earned": sum(r["earned"] for r in rows), "potential": sum(r["potential"] for r in rows),
             "received": sum(r["received_amount"] for r in rows), "behind": sum(1 for r in rows if r["behind"]),
             "pending_claim": sum(r["earned"] for r in rows if r["status"] == "open" and r["earned"] > 0),
@@ -773,7 +781,7 @@ async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_
     cheques.sort(key=lambda c: c["cheque_date"] or c.get("date") or "")
     due_today = [c for c in cheques if c["cheque_date"] == tiso]
     overdue = [c for c in cheques if c["cheque_date"] and c["cheque_date"] < tiso]
-    scheme_alerts = [{"label": (r.get("brand") or "All") + " · " + (r["scope_value"] if r.get("scope") != "all" else "All models"),
+    scheme_alerts = [{"label": (r.get("brand") or "All") + " · " + r.get("scope_label", "All models"),
                       "achieved_pct": r["achieved_pct"], "gap_qty": r["gap_qty"], "gap_amount": r["gap_amount"],
                       "potential": r["potential"], "basis": r["basis"]} for r in sch["rows"] if r["behind"]]
     # stock value
@@ -793,7 +801,7 @@ async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_
             "inactive": {"count": ina["count"], "regular_lost": ina["regular_lost"], "lost_revenue": ina["lost_revenue"],
                          "rows": [{"name": r["name"], "days_since": r["days_since"], "run_rate": r["monthly_run_rate"]} for r in ina["rows"][:5]]},
             "schemes": {"earned": sch["earned"], "potential": sch["potential"], "progress": sch["month_progress_pct"],
-                        "rows": [{"label": (r.get("brand") or "All") + " · " + (r["scope_value"] if r.get("scope") != "all" else "All models"),
+                        "rows": [{"label": (r.get("brand") or "All") + " · " + r.get("scope_label", "All models"),
                                   "achieved_pct": r["achieved_pct"], "met": r["met"], "behind": r["behind"], "basis": r["basis"], "gap_qty": r["gap_qty"], "gap_amount": r["gap_amount"]} for r in sch["rows"]],
                         "alerts": scheme_alerts},
             "cheque_alerts": {"due_today": due_today, "overdue": overdue, "due_today_total": sum(c["amount"] for c in due_today), "overdue_total": sum(c["amount"] for c in overdue)},

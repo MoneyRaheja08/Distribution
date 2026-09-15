@@ -9,9 +9,65 @@ from ..deps import current_company
 from ..db import db
 from ..models import ExecuteIn, OrderIn
 from ..serializers import public_order
+from ..ledger import sale_key
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 staff_only = require_roles("admin", "manager")
+
+
+def _norm(m):
+    return (m or "").strip().lower()
+
+
+@router.get("/dealer-models")
+async def dealer_models(dealer_id: str, company=Depends(current_company), user=Depends(get_current_user)):
+    """Models available in imported stock + how much of each model this dealer was already
+    billed before (so the collector knows what the dealer already owes for that model)."""
+    dealer = await db.dealers.find_one({"_id": dealer_id, "company_id": company})
+    if not dealer:
+        raise HTTPException(404, "Dealer not found")
+    if not is_staff(user) and dealer.get("collector_id") != user["_id"]:
+        raise HTTPException(403, "Not your dealer")
+
+    # ---- stock models from imports (IMEI units + qty-tracked lots) ----
+    agg = {}
+    pipeline = [{"$match": {"company_id": company}},
+                {"$group": {"_id": {"brand": "$brand", "model": "$model"},
+                            "available": {"$sum": {"$cond": [{"$eq": ["$status", "in_stock"]}, 1, 0]}}}}]
+    async for r in db.stock_units.aggregate(pipeline):
+        m, b = r["_id"].get("model"), r["_id"].get("brand")
+        if not m:
+            continue
+        agg[_norm(m)] = {"model": m, "brand": b, "available": r["available"]}
+    async for l in db.stock_lots.find({"company_id": company}):
+        m = l.get("model")
+        if not m:
+            continue
+        av = (l.get("in_qty", 0) or 0) - (l.get("sold_qty", 0) or 0)
+        k = _norm(m)
+        if k in agg:
+            agg[k]["available"] += av
+        else:
+            agg[k] = {"model": m, "brand": l.get("brand"), "available": av}
+    stock = sorted(agg.values(), key=lambda x: ((x["brand"] or ""), (x["model"] or "")))
+
+    # ---- this dealer's past billed history (dedupe re-imported duplicate lines) ----
+    seen, billed = set(), {}
+    async for s in db.sales.find({"company_id": company, "dealer_id": dealer_id}).sort("created_at", 1):
+        k = sale_key(s)
+        if k in seen:
+            continue
+        seen.add(k)
+        nk = _norm(s.get("model"))
+        if not nk:
+            continue
+        e = billed.setdefault(nk, {"model": s.get("model"), "brand": s.get("brand"), "units": 0, "value": 0.0})
+        q = s.get("qty") or 0
+        e["units"] += q if q > 0 else 1
+        e["value"] += s.get("amount") or 0
+    for e in billed.values():
+        e["value"] = round(e["value"])
+    return {"stock": stock, "billed": billed}
 
 
 @router.get("")
