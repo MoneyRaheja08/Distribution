@@ -49,6 +49,7 @@ class UserIn(BaseModel):
     can_view_sales: bool = False
     can_view_profit: bool = False
     can_view_digest: bool = False
+    can_view_stock_prices: bool = False
     company_ids: list[str] = []
 
 
@@ -64,6 +65,7 @@ class UserPatch(BaseModel):
     can_view_sales: Optional[bool] = None
     can_view_profit: Optional[bool] = None
     can_view_digest: Optional[bool] = None
+    can_view_stock_prices: Optional[bool] = None
     company_ids: Optional[list[str]] = None
 
 

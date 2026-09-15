@@ -565,8 +565,14 @@ async def imei_lookup(imei: str, company=Depends(current_company), _=Depends(get
     return u
 
 
+async def stock_price_perm(user=Depends(get_current_user)):
+    if user["role"] == "admin" or user.get("can_view_stock_prices"):
+        return user
+    raise HTTPException(403, "You do not have access to stock prices")
+
+
 @router.get("/catalog/model-history")
-async def model_history(model: str, company=Depends(current_company), _=Depends(get_current_user)):
+async def model_history(model: str, company=Depends(current_company), _=Depends(stock_price_perm)):
     """Full purchase + sale history and current stock for one model (Tap-to-track)."""
     model = (model or "").strip()
     if not model:
