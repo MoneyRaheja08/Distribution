@@ -43,6 +43,7 @@ def public_user(u):
         "can_view_profit": u.get("can_view_profit", False),
         "can_view_digest": u.get("can_view_digest", False),
         "can_view_stock_prices": u.get("can_view_stock_prices", False),
+        "can_view_payments": u.get("can_view_payments", False),
         "company_ids": u.get("company_ids", []),
     }
 
