@@ -85,6 +85,41 @@ async def _sales(company, frm, to, brand=""):
 
 
 # 4. Dealer scorecard 2.0 -------------------------------------------------------------
+@router.get("/profit-by-dealer")
+async def profit_by_dealer(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
+                           company=Depends(current_company), _=Depends(profit_perm)):
+    cost_of = await _cost_ctx(company)
+    sales = await _sales(company, frm, to, brand)
+    by = {}
+    tot_sale = tot_cost = 0.0
+    units = 0
+    for s in sales:
+        name = s.get("dealer_name") or "—"
+        d = by.setdefault(name, {"dealer": name, "sale": 0.0, "cost": 0.0, "units": 0, "bills": set()})
+        amt = s.get("amount", 0) or 0
+        c = cost_of(s)
+        q = 1 if s.get("imei") else (s.get("qty") or 0)
+        d["sale"] += amt
+        d["cost"] += c
+        d["units"] += q
+        if s.get("bill_no"):
+            d["bills"].add(s.get("bill_no"))
+        tot_sale += amt
+        tot_cost += c
+        units += q
+    rows = [{"dealer": v["dealer"], "sale": round(v["sale"]), "cost": round(v["cost"]),
+             "margin": round(v["sale"] - v["cost"]),
+             "margin_pct": round((v["sale"] - v["cost"]) / v["sale"] * 100, 1) if v["sale"] else 0,
+             "units": v["units"], "bills": len(v["bills"])} for v in by.values()]
+    rows.sort(key=lambda x: -x["margin"])
+    brands = sorted(b for b in await db.sales.distinct("brand", {"company_id": company}) if b)
+    return {"from": frm, "to": to, "brand": brand.upper(), "brands": brands,
+            "units": units, "total_sale": round(tot_sale), "total_cost": round(tot_cost),
+            "total_margin": round(tot_sale - tot_cost),
+            "total_margin_pct": round((tot_sale - tot_cost) / tot_sale * 100, 1) if tot_sale else 0,
+            "rows": rows}
+
+
 @router.get("/dealer-scorecard")
 async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
                            company=Depends(current_company), _=Depends(profit_perm)):
