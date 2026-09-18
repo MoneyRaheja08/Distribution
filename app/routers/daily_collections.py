@@ -52,6 +52,8 @@ class BillIn(BaseModel):
 
 
 class BillPatch(BaseModel):
+    bill_no: Optional[str] = None
+    items: Optional[List[BillItem]] = None
     customer: Optional[str] = None
     phone: Optional[str] = None
     total: Optional[float] = None
@@ -85,8 +87,20 @@ class ReconIn(BaseModel):
     note: Optional[str] = ""
 
 
+EDIT_WINDOW_SEC = 120
+
+
+def _editable_until(b):
+    try:
+        return datetime.fromisoformat(b["created_at"]).timestamp() + EDIT_WINDOW_SEC
+    except Exception:
+        return 0
+
+
 def _pub_bill(b, admin):
+    until = _editable_until(b)
     out = {
+        "editable_until": until, "locked": datetime.now(timezone.utc).timestamp() > until,
         "id": b["_id"], "date": b.get("date"), "bill_no": b.get("bill_no", ""),
         "customer": b.get("customer", ""), "phone": b.get("phone", ""),
         "items": b.get("items", []), "total": b.get("total", 0),
@@ -141,6 +155,10 @@ async def update_bill(bid: str, body: BillPatch, company=Depends(dc_company), us
     b = await db.dc_bills.find_one({"_id": bid, "company_id": company})
     if not b:
         raise HTTPException(404, "Bill not found")
+    if datetime.now(timezone.utc).timestamp() > _editable_until(b):
+        raise HTTPException(403, "Bill is locked — edits are allowed only within 2 minutes of saving")
+    if "items" in upd:
+        upd["items"] = [dict(i) for i in upd["items"]]
     await db.dc_bills.update_one({"_id": bid}, {"$set": upd})
     b.update(upd)
     return _pub_bill(b, _is_admin(user))
@@ -160,6 +178,31 @@ async def collect_pending(bid: str, body: CollectIn, company=Depends(dc_company)
     b["pending"] = new_pending
     b[field] = (b.get(field, 0) or 0) + amt
     return _pub_bill(b, _is_admin(user))
+
+
+@router.get("/calendar")
+async def dc_calendar(month: str, company=Depends(dc_company), user=Depends(get_current_user)):
+    if not _is_admin(user):
+        raise HTTPException(403, "Admin only")
+    q = {"company_id": company, "date": {"$gte": month + "-01", "$lte": month + "-31"}}
+    days = {}
+    async for b in db.dc_bills.find(q):
+        d = days.setdefault(b["date"], {"date": b["date"], "total": 0, "bills": 0, "nlc": 0, "pending": 0})
+        d["total"] += b.get("total", 0) or 0
+        d["bills"] += 1
+        d["nlc"] += b.get("nlc", 0) or 0
+        d["pending"] += b.get("pending", 0) or 0
+    async for e in db.dc_expenses.find(q):
+        d = days.setdefault(e["date"], {"date": e["date"], "total": 0, "bills": 0, "nlc": 0, "pending": 0})
+        d["expenses"] = d.get("expenses", 0) + (e.get("amount", 0) or 0)
+    rows = []
+    for d in sorted(days.values(), key=lambda x: x["date"]):
+        d["profit"] = round(d["total"] - d.pop("nlc"))
+        d["total"] = round(d["total"]); d["pending"] = round(d["pending"]); d["expenses"] = round(d.get("expenses", 0))
+        rows.append(d)
+    tot = round(sum(r["total"] for r in rows))
+    return {"month": month, "days": rows, "total": tot, "bills": sum(r["bills"] for r in rows),
+            "profit": round(sum(r["profit"] for r in rows)), "best": max(rows, key=lambda r: r["total"])["date"] if rows else None}
 
 
 @router.delete("/bills/{bid}")
