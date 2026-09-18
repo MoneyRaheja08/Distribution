@@ -114,7 +114,7 @@ def public_pricelist(pl, count=0):
 
 
 def public_company(c):
-    return {"id": c["_id"], "name": c["name"]}
+    return {"id": c["_id"], "name": c["name"], "kind": c.get("kind", "distribution")}
 
 
 def public_order(o):

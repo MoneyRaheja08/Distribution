@@ -24,12 +24,15 @@ async def list_companies(user=Depends(get_current_user)):
 async def create_company(body: CompanyIn, _=Depends(require_roles("admin"))):
     existed = await db.companies.count_documents({})
     cid = uuid.uuid4().hex
-    await db.companies.insert_one({"_id": cid, "name": body.name.strip()})
-    # First company ever: adopt all existing (untagged) data so nothing disappears.
-    if existed == 0:
+    kind = body.kind if body.kind in ("distribution", "daily_collections") else "distribution"
+    doc = {"_id": cid, "name": body.name.strip(), "kind": kind}
+    await db.companies.insert_one(doc)
+    # First company ever: adopt all existing (untagged) DISTRIBUTION data so nothing disappears.
+    # A Daily Collections company never absorbs existing data.
+    if existed == 0 and kind == "distribution":
         for coll in SCOPED:
             await db[coll].update_many({"company_id": {"$exists": False}}, {"$set": {"company_id": cid}})
-    return public_company({"_id": cid, "name": body.name.strip()})
+    return public_company(doc)
 
 
 @router.patch("/{cid}")

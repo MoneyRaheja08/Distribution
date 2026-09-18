@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db import db
-from .routers import auth, backup, bills, catalog, companies, dealers, invoices, orders, payables, payments, pricelists, reports, reports2, stock, users, visits
+from .routers import auth, backup, bills, catalog, companies, daily_collections, dealers, invoices, orders, payables, payments, pricelists, reports, reports2, stock, users, visits
 
 
 @asynccontextmanager
@@ -67,6 +67,7 @@ app.include_router(reports.router)
 app.include_router(reports2.router)
 app.include_router(catalog.router)
 app.include_router(payables.router)
+app.include_router(daily_collections.router)
 app.include_router(backup.router)
 
 

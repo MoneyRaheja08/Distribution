@@ -232,6 +232,7 @@ class MergeIn(BaseModel):
 # ---- companies (multi-company) ----
 class CompanyIn(BaseModel):
     name: str
+    kind: str = "distribution"
 
 
 class CompanyPatch(BaseModel):
