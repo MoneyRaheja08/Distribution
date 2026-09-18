@@ -36,6 +36,7 @@ def public_user(u):
         "role": u["role"],
         "price_list_access": u.get("price_list_access", False),
         "can_collect": u.get("can_collect", False),
+        "block_collect": u.get("block_collect", False),
         "can_import_statement": u.get("can_import_statement", False),
         "can_view_reports": u.get("can_view_reports", False),
         "can_view_dashboard": u.get("can_view_dashboard", False),

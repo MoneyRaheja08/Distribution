@@ -37,6 +37,8 @@ async def record_collection(body: CollectIn, company=Depends(current_company), u
         raise HTTPException(403, "Not your dealer")
     if user["role"] == "manager" and not user.get("can_collect", False):
         raise HTTPException(403, "You are not allowed to record collections")
+    if user["role"] == "collector" and user.get("block_collect", False):
+        raise HTTPException(403, "Recording collections is disabled for your account")
     due = (await _summary(body.dealer_id))["outstanding"]
     if body.amount > due + 1:
         raise HTTPException(400, f"Amount exceeds outstanding of {due:.0f}")

@@ -37,7 +37,7 @@ async def create_user(body: UserIn, _=Depends(admin_only)):
     uid = uuid.uuid4().hex
     u = {"_id": uid, "name": body.name.strip(), "pin_hash": hash_pin(body.pin),
          "role": body.role.value, "price_list_access": body.price_list_access,
-         "can_collect": body.can_collect, "can_import_statement": body.can_import_statement,
+         "can_collect": body.can_collect, "block_collect": body.block_collect, "can_import_statement": body.can_import_statement,
          "can_view_reports": body.can_view_reports, "can_view_dashboard": body.can_view_dashboard, "can_view_sales": body.can_view_sales,
          "can_view_profit": body.can_view_profit, "can_view_digest": body.can_view_digest,
          "can_view_stock_prices": body.can_view_stock_prices, "can_view_payments": body.can_view_payments, "company_ids": body.company_ids}
@@ -58,6 +58,8 @@ async def update_user(uid: str, body: UserPatch, _=Depends(admin_only)):
         upd["price_list_access"] = body.price_list_access
     if body.can_collect is not None:
         upd["can_collect"] = body.can_collect
+    if body.block_collect is not None:
+        upd["block_collect"] = body.block_collect
     if body.can_import_statement is not None:
         upd["can_import_statement"] = body.can_import_statement
     if body.can_view_reports is not None:
