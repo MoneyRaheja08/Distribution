@@ -5,7 +5,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 
-from ..auth import get_current_user
+from ..auth import get_current_user, hash_pin
 from ..deps import current_company
 from ..db import db
 
@@ -118,6 +118,20 @@ class ApproveIn(BaseModel):
 
 class CheckIn(BaseModel):
     checked: bool = True
+
+
+class DcUserIn(BaseModel):
+    name: str
+    pin: str
+    role: str = "collector"
+    perms: dict = {}
+
+
+class DcUserPatch(BaseModel):
+    name: Optional[str] = None
+    pin: Optional[str] = None
+    role: Optional[str] = None
+    perms: Optional[dict] = None
 
 
 EXPENSE_APPROVAL_LIMIT = 1000  # employee expenses above this need admin approval
@@ -546,6 +560,80 @@ async def check_receipt(rid: str, body: CheckIn, company=Depends(dc_company), us
     r = await db.dc_receipts.find_one_and_update({"_id": rid, "company_id": company}, {"$set": {"checked": bool(body.checked)}})
     if not r:
         raise HTTPException(404, "Receipt not found")
+    return {"ok": True}
+
+
+# ---------------- DC-only user management (admin) + per-feature permissions ----------------
+def _pub_dc_user(u):
+    return {"id": u["_id"], "name": u.get("name", ""), "role": u.get("role", "collector"),
+            "perms": u.get("dc_perms") or {}}
+
+
+@router.get("/my-perms")
+async def my_perms(company=Depends(dc_company), user=Depends(get_current_user)):
+    return {"role": user.get("role"), "is_admin": _is_admin(user), "perms": user.get("dc_perms") or {}}
+
+
+@router.get("/users")
+async def dc_list_users(company=Depends(dc_company), user=Depends(get_current_user)):
+    if not _is_admin(user):
+        raise HTTPException(403, "Admin only")
+    return [_pub_dc_user(u) async for u in db.users.find({"company_ids": company})]
+
+
+@router.post("/users")
+async def dc_create_user(body: DcUserIn, company=Depends(dc_company), user=Depends(get_current_user)):
+    if not _is_admin(user):
+        raise HTTPException(403, "Admin only")
+    if not body.name.strip():
+        raise HTTPException(400, "Name is required")
+    if len(body.pin or "") != 4:
+        raise HTTPException(400, "Set a 4-digit PIN")
+    if await db.users.find_one({"name": body.name.strip()}):
+        raise HTTPException(400, "A user with that name already exists")
+    role = body.role if body.role in ("collector", "manager", "admin") else "collector"
+    uid = uuid.uuid4().hex
+    u = {"_id": uid, "name": body.name.strip(), "pin_hash": hash_pin(body.pin), "role": role,
+         "company_ids": [company], "dc_perms": body.perms or {}}
+    await db.users.insert_one(u)
+    return _pub_dc_user(u)
+
+
+@router.patch("/users/{uid}")
+async def dc_update_user(uid: str, body: DcUserPatch, company=Depends(dc_company), user=Depends(get_current_user)):
+    if not _is_admin(user):
+        raise HTTPException(403, "Admin only")
+    u = await db.users.find_one({"_id": uid, "company_ids": company})
+    if not u:
+        raise HTTPException(404, "User not found")
+    upd = {}
+    if body.name is not None:
+        upd["name"] = body.name.strip()
+    if body.role in ("collector", "manager", "admin"):
+        upd["role"] = body.role
+    if body.pin:
+        if len(body.pin) != 4:
+            raise HTTPException(400, "PIN must be 4 digits")
+        upd["pin_hash"] = hash_pin(body.pin)
+    if body.perms is not None:
+        upd["dc_perms"] = body.perms
+    if not upd:
+        raise HTTPException(400, "Nothing to update")
+    await db.users.update_one({"_id": uid}, {"$set": upd})
+    u.update(upd)
+    return _pub_dc_user(u)
+
+
+@router.delete("/users/{uid}")
+async def dc_delete_user(uid: str, company=Depends(dc_company), user=Depends(get_current_user)):
+    if not _is_admin(user):
+        raise HTTPException(403, "Admin only")
+    if uid == user["_id"]:
+        raise HTTPException(400, "You cannot remove your own account")
+    await db.users.update_one({"_id": uid}, {"$pull": {"company_ids": company}})
+    nu = await db.users.find_one({"_id": uid})
+    if nu and not (nu.get("company_ids") or []) and nu.get("role") != "admin":
+        await db.users.delete_one({"_id": uid})
     return {"ok": True}
 
 
