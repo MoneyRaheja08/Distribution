@@ -4,6 +4,7 @@ from typing import Optional, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
+from pymongo import ReturnDocument
 
 from ..auth import get_current_user, hash_pin
 from ..deps import current_company
@@ -46,6 +47,7 @@ class BillItem(BaseModel):
     category: Optional[str] = ""
     model: Optional[str] = ""
     qty: float = 1
+    nlc: float = 0
 
 
 class BillIn(BaseModel):
@@ -54,7 +56,9 @@ class BillIn(BaseModel):
     customer: Optional[str] = ""
     phone: Optional[str] = ""
     items: List[BillItem] = []
+    staff_id: Optional[str] = None
     exchange: Optional[ExchangeItem] = None
+    exchanges: Optional[List[ExchangeItem]] = None
     total: float = 0
     cash: float = 0
     card: float = 0
@@ -125,6 +129,7 @@ class DcUserIn(BaseModel):
     pin: str
     role: str = "collector"
     perms: dict = {}
+    series: dict = {}
 
 
 class DcUserPatch(BaseModel):
@@ -132,6 +137,7 @@ class DcUserPatch(BaseModel):
     pin: Optional[str] = None
     role: Optional[str] = None
     perms: Optional[dict] = None
+    series: Optional[dict] = None
 
 
 EXPENSE_APPROVAL_LIMIT = 1000  # employee expenses above this need admin approval
@@ -158,7 +164,9 @@ def _pub_bill(b, admin, resale=0):
         "finance": b.get("finance", 0),
         "pending": b.get("pending", 0), "note": b.get("note", ""),
         "staff": b.get("staff_name", ""), "staff_id": b.get("staff_id"),
-        "exchange": b.get("exchange") or None, "resale": round(resale or 0),
+        "exchange": b.get("exchange") or None,
+        "exchanges": b.get("exchanges") or ([b["exchange"]] if b.get("exchange") else []),
+        "resale": round(resale or 0),
         "created_at": b.get("created_at"),
     }
     if admin:
@@ -175,6 +183,21 @@ async def _resale_by_bill(company, bill_ids):
     async for x in db.dc_exchanges.find({"company_id": company, "bill_id": {"$in": ids}, "status": "resold"}):
         m[x["bill_id"]] = m.get(x["bill_id"], 0) + (x.get("resale_amount", 0) or 0)
     return m
+
+
+def _norm_series(s):
+    s = s or {}
+    return {"prefix": (s.get("prefix") or "").strip().upper(), "next": int(s.get("next") or 1), "pad": int(s.get("pad") or 4)}
+
+
+async def _next_bill_no(collector_id):
+    u = await db.users.find_one_and_update(
+        {"_id": collector_id},
+        [{"$set": {"dc_series.next": {"$add": [{"$ifNull": ["$dc_series.next", 1]}, 1]}}}],
+        return_document=ReturnDocument.AFTER)
+    s = (u or {}).get("dc_series") or {}
+    assigned = int(s.get("next") or 2) - 1
+    return (s.get("prefix") or "") + str(assigned).zfill(int(s.get("pad") or 4))
 
 
 # ---------------- Bills ----------------
@@ -205,25 +228,43 @@ async def list_bills(date: Optional[str] = None, frm: Optional[str] = None, to: 
 
 @router.post("/bills")
 async def create_bill(body: BillIn, company=Depends(dc_company), user=Depends(get_current_user)):
-    doc = body.model_dump()
-    exchange = doc.pop("exchange", None)
-    doc["items"] = [i for i in doc.get("items", [])]
+    collector = user
+    if _is_admin(user) and body.staff_id:
+        c = await db.users.find_one({"_id": body.staff_id, "company_ids": company})
+        if c:
+            collector = c
+    items = [dict(i) for i in body.items]
+    item_nlc = sum((i.get("nlc", 0) or 0) for i in items)
+    nlc = item_nlc if item_nlc > 0 else (body.nlc or 0)
     bid = uuid.uuid4().hex
-    doc.update({"_id": bid, "company_id": company, "date": body.date or _today(),
-                "staff_id": user["_id"], "staff_name": user.get("name", ""),
-                "created_at": datetime.now(timezone.utc).isoformat()})
-    if exchange and (exchange.get("model") or exchange.get("brand")):
-        doc["exchange"] = {"brand": exchange.get("brand", ""), "model": exchange.get("model", ""),
-                           "note": exchange.get("note", ""), "value": exchange.get("value", 0) or 0}
+    now = datetime.now(timezone.utc).isoformat()
+    bno = await _next_bill_no(collector["_id"])
+    doc = {"_id": bid, "company_id": company, "date": body.date or _today(), "bill_no": bno,
+           "customer": body.customer or "", "phone": body.phone or "", "items": items,
+           "total": body.total or 0, "cash": body.cash or 0, "card": body.card or 0,
+           "upi": body.upi or 0, "finance": body.finance or 0, "nlc": nlc, "pending": body.pending or 0,
+           "note": body.note or "", "staff_id": collector["_id"], "staff_name": collector.get("name", ""),
+           "created_at": now}
+    exs = list(body.exchanges or [])
+    if body.exchange:
+        exs.append(body.exchange)
+    saved = []
+    for e in exs:
+        e = dict(e)
+        if not (e.get("model") or e.get("brand")):
+            continue
+        row = {"brand": e.get("brand", ""), "model": e.get("model", ""), "note": e.get("note", ""), "value": e.get("value", 0) or 0}
+        saved.append(row)
         await db.dc_exchanges.insert_one({
             "_id": uuid.uuid4().hex, "company_id": company, "bill_id": bid,
-            "seller_staff_id": user["_id"], "seller_staff_name": user.get("name", ""),
-            "customer": body.customer or "", "brand": exchange.get("brand", ""),
-            "model": exchange.get("model", ""), "note": exchange.get("note", ""),
-            "value": exchange.get("value", 0) or 0, "status": "in_stock",
-            "resale_amount": 0, "resale_mode": "", "resold_date": None,
-            "date": doc["date"], "created_at": doc["created_at"],
-        })
+            "seller_staff_id": collector["_id"], "seller_staff_name": collector.get("name", ""),
+            "customer": body.customer or "", "brand": row["brand"], "model": row["model"],
+            "note": row["note"], "value": row["value"], "status": "in_stock",
+            "resale_amount": 0, "resale_mode": "", "resold_date": None, "resale_status": "none",
+            "date": doc["date"], "created_at": now})
+    if saved:
+        doc["exchange"] = saved[0]
+        doc["exchanges"] = saved
     await db.dc_bills.insert_one(doc)
     return _pub_bill(doc, _is_admin(user))
 
@@ -231,6 +272,8 @@ async def create_bill(body: BillIn, company=Depends(dc_company), user=Depends(ge
 @router.patch("/bills/{bid}")
 async def update_bill(bid: str, body: BillPatch, company=Depends(dc_company), user=Depends(get_current_user)):
     upd = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if "bill_no" in upd and not _is_admin(user):
+        upd.pop("bill_no")
     if not upd:
         raise HTTPException(400, "Nothing to update")
     b = await db.dc_bills.find_one({"_id": bid, "company_id": company})
@@ -240,6 +283,9 @@ async def update_bill(bid: str, body: BillPatch, company=Depends(dc_company), us
         raise HTTPException(403, "Bill is locked — edits are allowed only within 2 minutes of saving")
     if "items" in upd:
         upd["items"] = [dict(i) for i in upd["items"]]
+        inl = sum((i.get("nlc", 0) or 0) for i in upd["items"])
+        if inl > 0 and "nlc" not in upd:
+            upd["nlc"] = inl
     await db.dc_bills.update_one({"_id": bid}, {"$set": upd})
     b.update(upd)
     return _pub_bill(b, _is_admin(user))
@@ -566,7 +612,7 @@ async def check_receipt(rid: str, body: CheckIn, company=Depends(dc_company), us
 # ---------------- DC-only user management (admin) + per-feature permissions ----------------
 def _pub_dc_user(u):
     return {"id": u["_id"], "name": u.get("name", ""), "role": u.get("role", "collector"),
-            "perms": u.get("dc_perms") or {}}
+            "perms": u.get("dc_perms") or {}, "series": u.get("dc_series") or {}}
 
 
 @router.get("/my-perms")
@@ -594,7 +640,7 @@ async def dc_create_user(body: DcUserIn, company=Depends(dc_company), user=Depen
     role = body.role if body.role in ("collector", "manager", "admin") else "collector"
     uid = uuid.uuid4().hex
     u = {"_id": uid, "name": body.name.strip(), "pin_hash": hash_pin(body.pin), "role": role,
-         "company_ids": [company], "dc_perms": body.perms or {}}
+         "company_ids": [company], "dc_perms": body.perms or {}, "dc_series": _norm_series(body.series)}
     await db.users.insert_one(u)
     return _pub_dc_user(u)
 
@@ -617,6 +663,8 @@ async def dc_update_user(uid: str, body: DcUserPatch, company=Depends(dc_company
         upd["pin_hash"] = hash_pin(body.pin)
     if body.perms is not None:
         upd["dc_perms"] = body.perms
+    if body.series is not None:
+        upd["dc_series"] = _norm_series(body.series)
     if not upd:
         raise HTTPException(400, "Nothing to update")
     await db.users.update_one({"_id": uid}, {"$set": upd})
