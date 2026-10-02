@@ -120,7 +120,37 @@ async def profit_by_dealer(frm: str = Query(alias="from"), to: str = Query(...),
             "rows": rows}
 
 
-@router.get("/dealer-scorecard")
+@router.get("/profit-by-dealer/detail")
+async def profit_by_dealer_detail(frm: str = Query(alias="from"), to: str = Query(...), dealer: str = Query(...),
+                                  brand: str = "", company=Depends(current_company), _=Depends(profit_perm)):
+    """Drill-down for one dealer: every billed line with sale rate, NLC (cost) and margin —
+    so you can see exactly how the dealer's margin was computed."""
+    cost_of = await _cost_ctx(company)
+    sales = await _sales(company, frm, to, brand)
+    bills = {}
+    for s in sales:
+        if (s.get("dealer_name") or "—") != dealer:
+            continue
+        amt = s.get("amount", 0) or 0
+        c = cost_of(s)
+        q = 1 if s.get("imei") else (s.get("qty") or 0)
+        bno = s.get("bill_no") or "—"
+        b = bills.setdefault(bno, {"bill_no": bno, "date": s.get("date"), "sale": 0.0, "cost": 0.0, "units": 0, "lines": []})
+        b["sale"] += amt
+        b["cost"] += c
+        b["units"] += q
+        b["lines"].append({"model": s.get("model") or "—", "brand": s.get("brand") or "", "imei": s.get("imei") or "",
+                           "qty": q, "sale": round(amt), "cost": round(c), "margin": round(amt - c),
+                           "rate": round(amt / q) if q else round(amt), "nlc": round(c / q) if q else round(c)})
+    rows = []
+    for b in bills.values():
+        b["sale"] = round(b["sale"]); b["cost"] = round(b["cost"]); b["margin"] = b["sale"] - b["cost"]
+        b["margin_pct"] = round(b["margin"] / b["sale"] * 100, 1) if b["sale"] else 0
+        rows.append(b)
+    rows.sort(key=lambda x: (x.get("date") or ""))
+    return {"dealer": dealer, "from": frm, "to": to, "brand": brand.upper(),
+            "sale": round(sum(r["sale"] for r in rows)), "cost": round(sum(r["cost"] for r in rows)),
+            "margin": round(sum(r["margin"] for r in rows)), "bills": len(rows), "rows": rows}
 async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
                            company=Depends(current_company), _=Depends(profit_perm)):
     # Run the independent, read-only sub-queries concurrently.
