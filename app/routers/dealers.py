@@ -195,8 +195,11 @@ async def seed_ledger(did: str, body: SeedIn, company=Depends(current_company), 
         docs.append({"_id": uuid.uuid4().hex, "dealer_id": did, "bill_no": "Opening",
                      "date": body.opening_date or "2000-01-01", "amount": body.opening, "source": "opening", "company_id": company})
     for b in body.bills:
-        docs.append({"_id": uuid.uuid4().hex, "dealer_id": did, "bill_no": b.bill_no,
-                     "date": b.date, "amount": b.amount, "source": "statement", "company_id": company})
+        if not b.amount or b.amount <= 0:
+            continue
+        docs.append({"_id": uuid.uuid4().hex, "dealer_id": did, "bill_no": b.bill_no or "—",
+                     "date": b.date or body.opening_date or "2000-01-01", "amount": b.amount,
+                     "source": "statement", "company_id": company})
     if docs:
         await db.bills.insert_many(docs)
     pdocs = []

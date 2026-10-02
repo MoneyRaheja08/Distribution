@@ -206,10 +206,16 @@ class SeedPayment(BaseModel):
     amount: float
 
 
+class SeedBill(BaseModel):
+    bill_no: Optional[str] = ""
+    date: Optional[str] = None
+    amount: float
+
+
 class SeedIn(BaseModel):
     opening: float = 0
     opening_date: Optional[str] = None
-    bills: list[BillIn] = []
+    bills: list[SeedBill] = []
     payments: list[SeedPayment] = []
 
 

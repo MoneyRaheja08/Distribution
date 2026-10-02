@@ -617,7 +617,7 @@ def _pub_dc_user(u):
 
 @router.get("/my-perms")
 async def my_perms(company=Depends(dc_company), user=Depends(get_current_user)):
-    return {"role": user.get("role"), "is_admin": _is_admin(user), "perms": user.get("dc_perms") or {}}
+    return {"role": user.get("role"), "is_admin": _is_admin(user), "perms": user.get("dc_perms") or {}, "series": user.get("dc_series") or {}}
 
 
 @router.get("/users")
