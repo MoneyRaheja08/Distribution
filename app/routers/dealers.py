@@ -11,7 +11,7 @@ from ..db import db
 from ..ledger import compute, bill_breakdown
 from ..models import BillIn, BulkBills, DealerIn, DealerPatch, MergeIn, SeedIn, VisitIn
 from ..serializers import public_dealer
-from .targets import compute_target, target_pub
+from .targets import achievement, target_pub
 
 router = APIRouter(prefix="/dealers", tags=["dealers"])
 staff_only = require_roles("admin", "manager")
@@ -125,10 +125,14 @@ async def dealer_ledger(did: str, company=Depends(current_company), user=Depends
         r["balance"] = round(bal)
     summ = compute(bills, pays)
     today = date.today().isoformat()
-    targets = []
+    tdocs = []
     async for t in db.dealer_targets.find({"dealer_id": did, "company_id": company}):
         if (t.get("date_to") or "") >= today:
-            targets.append({**target_pub(t), **compute_target(t, bills, today)})
+            tdocs.append(t)
+    sales = []
+    if any(t.get("brand") for t in tdocs):
+        sales = [s async for s in db.sales.find({"company_id": company, "dealer_name": d["name"]})]
+    targets = [{**target_pub(t), **achievement(t, bills, sales, today)} for t in tdocs]
     targets.sort(key=lambda x: (x.get("date_to") or ""))
     return {"dealer": d["name"], "outstanding": summ["outstanding"], "ageing": summ["ageing"],
             "last_payment": summ["last_payment"], "credit_limit": d.get("credit_limit", 0),
