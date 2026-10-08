@@ -9,6 +9,7 @@ from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
 from ..ledger import compute, bill_breakdown, _parse, brand_match, sale_key, purchase_key
+from ..costlib import cost_override_map
 from .reports import admin, sales_perm, profit_perm, digest_perm
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -61,13 +62,16 @@ async def _cost_ctx(company):
     async for u in db.stock_units.find({"company_id": company}, {"imei": 1, "purchase_rate": 1}):
         if u.get("imei") and u.get("purchase_rate"):
             imei_pr[u["imei"]] = u["purchase_rate"]
+    overrides = await cost_override_map(company)
 
     def cost_of(s):
         if s.get("imei") and s["imei"] in imei_pr:
             return imei_pr[s["imei"]]
-        mc = model_cost.get((s.get("brand") or "—", s.get("model") or "—"))
         q = 1 if s.get("imei") else (s.get("qty", 0) or 0)
-        return (mc["amt"] / mc["qty"] * q) if mc and mc["qty"] else 0.0
+        mc = model_cost.get((s.get("brand") or "—", s.get("model") or "—"))
+        if mc and mc["qty"]:
+            return mc["amt"] / mc["qty"] * q
+        return overrides.get(((s.get("brand") or "—").strip().upper(), s.get("model") or "—"), 0.0) * q
     return cost_of
 
 

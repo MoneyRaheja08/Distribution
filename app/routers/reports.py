@@ -8,6 +8,7 @@ from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
 from ..ledger import compute, bill_breakdown, brand_match, brand_query, sale_key, purchase_key
+from ..costlib import cost_override_map
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -279,7 +280,11 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
 
     def avg_cost(bb, model):
         mc = model_cost.get((bb, model))
-        return (mc["amt"] / mc["qty"]) if mc and mc["qty"] else 0.0
+        if mc and mc["qty"]:
+            return mc["amt"] / mc["qty"]
+        return overrides.get((bb, model), 0.0)
+
+    overrides = await cost_override_map(company)
 
     imei_pr = {}
     async for u in db.stock_units.find({"company_id": company, "status": "sold"}, {"imei": 1, "purchase_rate": 1}):
@@ -318,7 +323,7 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
         revenue += amt
         if sdoc.get("imei"):
             q = 1
-            c = imei_pr.get(sdoc["imei"], avg_cost(bb, model))
+            c = imei_pr.get(sdoc["imei"]) or avg_cost(bb, model)
         else:
             q = sdoc.get("qty", 0) or 0
             c = q * avg_cost(bb, model)
@@ -387,6 +392,58 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
             "total_receivables": round(total_receivables),
             "ann_sales": round(ann_sales), "ann_cogs": round(ann_cogs),
             "stock_days": round(stock_days), "recv_days": round(recv_days)}
+
+
+@router.get("/profit2/no-cost")
+async def profit2_no_cost(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
+                          company=Depends(current_company), _=Depends(profit_perm)):
+    """Models sold in range whose cost couldn't be found (no purchase, no override) — so the
+    admin can set a manual NLC for them."""
+    bsel = brand.strip().upper()
+    model_cost = {}
+    async for pr in db.purchases.find({"company_id": company}):
+        mc = model_cost.setdefault(((pr.get("brand") or "—").strip().upper(), pr.get("model") or "—"), {"amt": 0.0, "qty": 0})
+        mc["amt"] += pr.get("amount", 0) or 0
+        mc["qty"] += (pr.get("qty", 0) or 0)
+    overrides = await cost_override_map(company)
+
+    def per_unit(bb, model):
+        mc = model_cost.get((bb, model))
+        if mc and mc["qty"]:
+            return mc["amt"] / mc["qty"]
+        return overrides.get((bb, model), 0.0)
+
+    imei_pr = {}
+    async for u in db.stock_units.find({"company_id": company, "status": "sold"}, {"imei": 1, "purchase_rate": 1}):
+        if u.get("imei"):
+            imei_pr[u["imei"]] = u.get("purchase_rate") or 0
+    groups, seen = {}, {}
+    async for s in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}).sort("created_at", 1):
+        amt = s.get("amount", 0) or 0
+        bb = (s.get("brand") or "—").strip().upper()
+        model = s.get("model") or "—"
+        key = (s.get("bill_no"), s.get("imei")) if s.get("imei") else (s.get("bill_no"), model, s.get("qty"), amt)
+        batch = s.get("import_batch") or ""
+        if key in seen and seen[key] != batch:
+            continue
+        seen[key] = batch
+        if bsel and not brand_match(s, bsel):
+            continue
+        if s.get("imei"):
+            q = 1
+            c = imei_pr.get(s["imei"]) or per_unit(bb, model)
+        else:
+            q = s.get("qty", 0) or 0
+            c = q * per_unit(bb, model)
+        if c <= 0 and amt > 0:
+            g = groups.setdefault((bb, model), {"brand": bb, "model": model, "units": 0, "sale": 0.0})
+            g["units"] += q
+            g["sale"] += amt
+    rows = [{"brand": v["brand"], "model": v["model"], "units": v["units"], "sale": round(v["sale"]),
+             "avg_rate": round(v["sale"] / v["units"]) if v["units"] else round(v["sale"]),
+             "override_nlc": overrides.get((v["brand"], v["model"]), 0)} for v in groups.values()]
+    rows.sort(key=lambda x: -x["sale"])
+    return {"rows": rows}
 
 
 @router.get("/brand-scorecard")
