@@ -191,13 +191,13 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
                      "imei": s.get("imei"), "qty": s.get("qty", 0), "rate": round(s.get("rate", 0)), "amount": round(amt)})
         d = by_dealer.setdefault(s.get("dealer_name") or "—", {"amount": 0, "qty": 0})
         d["amount"] += amt; d["qty"] += s.get("qty", 0) or 1
-        m = by_model.setdefault(s.get("model") or "—", {"model": s.get("model") or "—", "brand": s.get("brand"), "amount": 0, "qty": 0})
+        m = by_model.setdefault(s.get("model") or "—", {"model": s.get("model") or "—", "brand": s.get("brand"), "group": s.get("group") or s.get("sub_group") or "", "amount": 0, "qty": 0})
         m["amount"] += amt; m["qty"] += s.get("qty", 0) or 1
     return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:2000], "duplicates_ignored": dups,
             "dealers": sorted(all_dealers), "models": sorted(all_models), "brands": sorted(all_brands),
             "by_dealer": [{"dealer": k, "amount": round(v["amount"]), "qty": v["qty"]}
                           for k, v in sorted(by_dealer.items(), key=lambda x: -x[1]["amount"])],
-            "by_model": [{"model": v["model"], "brand": v["brand"], "amount": round(v["amount"]), "qty": v["qty"]}
+            "by_model": [{"model": v["model"], "brand": v["brand"], "group": v["group"], "amount": round(v["amount"]), "qty": v["qty"]}
                          for v in sorted(by_model.values(), key=lambda x: -x["qty"])]}
 
 
