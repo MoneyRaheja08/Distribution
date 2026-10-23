@@ -39,29 +39,55 @@ def _live(p):
 @router.get("/collection-vs-sales")
 async def collection_vs_sales(frm: str = Query(alias="from"), to: str = Query(...), group: str = "day",
                               company=Depends(current_company), _=Depends(admin)):
-    """Trend of what you billed to dealers (sales) vs what collectors actually collected,
-    bucketed by day or month, with the running shortfall (sold but not yet collected)."""
-    def key(d):
-        return (d or "")[:7] if group == "month" else (d or "")
+    """Trend of what you billed to dealers (sales) vs what collectors actually collected.
+    group=day|month → time trend with running shortfall; group=collector → per collector
+    (sales of the dealers they're assigned to vs what they collected)."""
     acc = {}
-    async for b in db.bills.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
-        k = key(b.get("date"))
-        acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["sales"] += b.get("amount", 0) or 0
-    async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
-        if not _live(p):
-            continue
-        k = key(p.get("date"))
-        acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["collected"] += p.get("amount", 0) or 0
-    rows = sorted(acc.values(), key=lambda x: x["period"])
-    run = 0.0
-    out = []
-    for r in rows:
-        gap = r["sales"] - r["collected"]
-        run += gap
-        out.append({"period": r["period"], "sales": round(r["sales"]), "collected": round(r["collected"]),
-                    "gap": round(gap), "cum_gap": round(run),
-                    "pct": (round(r["collected"] / r["sales"] * 100) if r["sales"] else None)})
-    ts = sum(r["sales"] for r in rows); tc = sum(r["collected"] for r in rows)
+    if group == "collector":
+        # dealer -> assigned collector id; collector id -> name
+        dealer_coll = {}
+        async for d in db.dealers.find({"company_id": company}, {"collector_id": 1}):
+            dealer_coll[d["_id"]] = d.get("collector_id")
+        names = {}
+        async for u in db.users.find({"role": "collector"}):
+            if company in (u.get("company_ids") or []):
+                names[u["_id"]] = u.get("name")
+
+        def disp(cid):
+            return names.get(cid) or "Unassigned"
+        async for b in db.bills.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+            k = disp(dealer_coll.get(b.get("dealer_id")))
+            acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["sales"] += b.get("amount", 0) or 0
+        async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+            if not _live(p):
+                continue
+            k = p.get("collector_name") or disp(p.get("collector_id"))
+            acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["collected"] += p.get("amount", 0) or 0
+        rows = sorted(acc.values(), key=lambda x: -x["sales"])
+        out = [{"period": r["period"], "sales": round(r["sales"]), "collected": round(r["collected"]),
+                "gap": round(r["sales"] - r["collected"]), "cum_gap": 0,
+                "pct": (round(r["collected"] / r["sales"] * 100) if r["sales"] else None)} for r in rows]
+    else:
+        def key(d):
+            return (d or "")[:7] if group == "month" else (d or "")
+        async for b in db.bills.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+            k = key(b.get("date"))
+            acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["sales"] += b.get("amount", 0) or 0
+        async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+            if not _live(p):
+                continue
+            k = key(p.get("date"))
+            acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["collected"] += p.get("amount", 0) or 0
+        srows = sorted(acc.values(), key=lambda x: x["period"])
+        run = 0.0
+        out = []
+        for r in srows:
+            gap = r["sales"] - r["collected"]
+            run += gap
+            out.append({"period": r["period"], "sales": round(r["sales"]), "collected": round(r["collected"]),
+                        "gap": round(gap), "cum_gap": round(run),
+                        "pct": (round(r["collected"] / r["sales"] * 100) if r["sales"] else None)})
+    ts = sum(r["sales"] for r in out); tc = sum(r["collected"] for r in out)
     return {"from": frm, "to": to, "group": group, "rows": out,
             "total_sales": round(ts), "total_collected": round(tc),
             "gap": round(ts - tc), "pct": (round(tc / ts * 100) if ts else 0)}
