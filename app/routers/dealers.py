@@ -131,7 +131,9 @@ async def dealer_ledger(did: str, company=Depends(current_company), user=Depends
             tdocs.append(t)
     sales = []
     if any(t.get("brand") for t in tdocs):
-        sales = [s async for s in db.sales.find({"company_id": company, "dealer_name": d["name"]})]
+        # match this dealer's sale line-items by id (robust), falling back to name for legacy rows
+        sales = [s async for s in db.sales.find({"company_id": company,
+                 "$or": [{"dealer_id": did}, {"dealer_name": d["name"]}]})]
     targets = [{**target_pub(t), **achievement(t, bills, sales, today)} for t in tdocs]
     targets.sort(key=lambda x: (x.get("date_to") or ""))
     return {"dealer": d["name"], "outstanding": summ["outstanding"], "ageing": summ["ageing"],

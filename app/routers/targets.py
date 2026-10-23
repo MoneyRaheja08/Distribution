@@ -126,18 +126,29 @@ async def list_targets(company=Depends(current_company), user=Depends(get_curren
     if need_ids:
         async for b in db.bills.find({"company_id": company, "dealer_id": {"$in": need_ids}}):
             bills_by.setdefault(b["dealer_id"], []).append(b)
-    names = list({(dealers.get(t["dealer_id"]) or {}).get("name") for t in mine if t.get("brand")} - {None})
+    # brand targets: pull each dealer's sale line-items, matching by dealer_id (robust) and
+    # falling back to dealer_name for legacy sales that predate the dealer_id field
+    bt_ids = {t["dealer_id"] for t in mine if t.get("brand")}
+    id_by_name = {}
+    for did in bt_ids:
+        nm = (dealers.get(did) or {}).get("name")
+        if nm:
+            id_by_name[nm] = did
     sales_by = {}
-    if names:
-        async for s in db.sales.find({"company_id": company, "dealer_name": {"$in": names}}):
-            sales_by.setdefault(s.get("dealer_name"), []).append(s)
+    if bt_ids:
+        q = {"company_id": company, "$or": [{"dealer_id": {"$in": list(bt_ids)}},
+                                            {"dealer_name": {"$in": list(id_by_name.keys())}}]}
+        async for s in db.sales.find(q):
+            sid = s.get("dealer_id") if s.get("dealer_id") in bt_ids else id_by_name.get(s.get("dealer_name"))
+            if sid:
+                sales_by.setdefault(sid, []).append(s)
     today = date.today().isoformat()
     rows = []
     for t in mine:
         d = dealers.get(t["dealer_id"]) or {}
         rows.append({**target_pub(t), "dealer_name": d.get("name", "—"), "phone": d.get("phone"),
                      "collector_id": d.get("collector_id"),
-                     **achievement(t, bills_by.get(t["dealer_id"], []), sales_by.get(d.get("name"), []), today)})
+                     **achievement(t, bills_by.get(t["dealer_id"], []), sales_by.get(t["dealer_id"], []), today)})
     rows.sort(key=lambda r: (0 if r["status"] == "behind" else 1, -(r["achieved_pct"] or 0), r["dealer_name"]))
     active = [r for r in rows if not r["expired"]]
     summary = {"targets": len(rows), "active": len(active),
