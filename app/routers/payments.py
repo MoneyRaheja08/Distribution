@@ -50,11 +50,19 @@ async def record_collection(body: CollectIn, company=Depends(current_company), u
             cheque_date = date.fromisoformat(body.cheque_date[:10]).isoformat()
         except ValueError:
             raise HTTPException(400, "Cheque date must be YYYY-MM-DD")
+    # Attribute the collection: staff (admin/manager) may record it on behalf of the collector who actually collected
+    coll_id, coll_name = user["_id"], user["name"]
+    if body.collected_by and is_staff(user):
+        cu = await db.users.find_one({"_id": body.collected_by})
+        if not cu or (cu.get("role") != "admin" and company not in (cu.get("company_ids") or [])):
+            raise HTTPException(400, "Selected collector is not in this company")
+        coll_id, coll_name = cu["_id"], cu["name"]
     receipt = await _next_receipt()
     pending = body.mode.value == "Cheque"
     approved = user["role"] != "collector"   # collector payments need approval
     payment = {"_id": uuid.uuid4().hex, "dealer_id": dealer["_id"], "dealer_name": dealer["name"],
-               "collector_id": user["_id"], "collector_name": user["name"], "amount": body.amount,
+               "collector_id": coll_id, "collector_name": coll_name, "amount": body.amount,
+               "entered_by_id": user["_id"], "entered_by_name": user["name"],
                "mode": body.mode.value, "cheque": (body.cheque or "").strip(), "cheque_date": cheque_date, "date": date.today().isoformat(),
                "ts": datetime.now(timezone.utc), "receipt": receipt,
                "status": "pending" if pending else "cleared", "deposited": False, "approved": approved,
