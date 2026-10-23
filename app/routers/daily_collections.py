@@ -798,10 +798,11 @@ async def dc_reports(frm: str, to: str, company=Depends(dc_company), user=Depend
         tot["bills"] += 1
         for k in by_pay:
             by_pay[k] += b.get(k, 0) or 0
-        d = by_day.setdefault(b.get("date"), {"date": b.get("date"), "total": 0, "nlc": 0, "bills": 0, "resale": 0})
+        d = by_day.setdefault(b.get("date"), {"date": b.get("date"), "total": 0, "nlc": 0, "bills": 0, "resale": 0, "pending": 0})
         d["total"] += t
         d["nlc"] += b.get("nlc", 0) or 0
         d["bills"] += 1
+        d["pending"] += b.get("pending", 0) or 0
         s = by_staff.setdefault(b.get("staff_name", "—"), {"staff": b.get("staff_name", "—"), "total": 0, "nlc": 0, "bills": 0, "resale": 0})
         s["total"] += t
         s["nlc"] += b.get("nlc", 0) or 0
@@ -834,6 +835,10 @@ async def dc_reports(frm: str, to: str, company=Depends(dc_company), user=Depend
             r["total"] = round(r["total"])
             if admin:
                 r["profit"] = round(r["total"] - r.get("nlc", 0) + r.get("resale", 0))
+            # sales vs collection: billed = total, collected = total - pending
+            if "pending" in r:
+                r["pending"] = round(r.get("pending", 0) or 0)
+                r["collected"] = round(r["total"] - r["pending"])
             r.pop("nlc", None)
             r.pop("resale", None)
             out.append(r)
