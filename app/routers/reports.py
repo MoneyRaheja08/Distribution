@@ -36,6 +36,37 @@ def _live(p):
     return p.get("approved", True) and p.get("status") != "bounced" and p.get("collector_id") not in (None, "seed")
 
 
+@router.get("/collection-vs-sales")
+async def collection_vs_sales(frm: str = Query(alias="from"), to: str = Query(...), group: str = "day",
+                              company=Depends(current_company), _=Depends(admin)):
+    """Trend of what you billed to dealers (sales) vs what collectors actually collected,
+    bucketed by day or month, with the running shortfall (sold but not yet collected)."""
+    def key(d):
+        return (d or "")[:7] if group == "month" else (d or "")
+    acc = {}
+    async for b in db.bills.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+        k = key(b.get("date"))
+        acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["sales"] += b.get("amount", 0) or 0
+    async for p in db.payments.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}):
+        if not _live(p):
+            continue
+        k = key(p.get("date"))
+        acc.setdefault(k, {"period": k, "sales": 0.0, "collected": 0.0})["collected"] += p.get("amount", 0) or 0
+    rows = sorted(acc.values(), key=lambda x: x["period"])
+    run = 0.0
+    out = []
+    for r in rows:
+        gap = r["sales"] - r["collected"]
+        run += gap
+        out.append({"period": r["period"], "sales": round(r["sales"]), "collected": round(r["collected"]),
+                    "gap": round(gap), "cum_gap": round(run),
+                    "pct": (round(r["collected"] / r["sales"] * 100) if r["sales"] else None)})
+    ts = sum(r["sales"] for r in rows); tc = sum(r["collected"] for r in rows)
+    return {"from": frm, "to": to, "group": group, "rows": out,
+            "total_sales": round(ts), "total_collected": round(tc),
+            "gap": round(ts - tc), "pct": (round(tc / ts * 100) if ts else 0)}
+
+
 @router.get("/collections")
 async def collections_report(frm: str = Query(alias="from"), to: str = Query(...), company=Depends(current_company), _=Depends(admin)):
     by_mode, by_collector, total, rows = {}, {}, 0, []
