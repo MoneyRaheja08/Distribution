@@ -579,15 +579,19 @@ async def model_history(model: str, company=Depends(current_company), _=Depends(
         raise HTTPException(400, "model is required")
     brand = None
     total = avail = 0
+    imeis = []
     async for u in db.stock_units.find({"company_id": company, "model": model}):
         total += 1
         if u.get("status") == "in_stock":
             avail += 1
+        if u.get("imei"):
+            imeis.append(u["imei"])
         brand = brand or u.get("brand")
     async for l in db.stock_lots.find({"company_id": company, "model": model}):
         total += l.get("in_qty", 0) or 0
         avail += (l.get("in_qty", 0) or 0) - (l.get("sold_qty", 0) or 0)
         brand = brand or l.get("brand")
+    sold_from_stock = max(0, total - avail)   # units no longer in stock = sold (reliable, IMEI/lot based)
     seenp, purchases = set(), []
     async for p in db.purchases.find({"company_id": company, "model": model}).sort("date", -1):
         k = purchase_key(p)
@@ -598,8 +602,13 @@ async def model_history(model: str, company=Depends(current_company), _=Depends(
         purchases.append({"date": p.get("date"), "bill_no": p.get("bill_no"), "party": p.get("supplier"),
                           "qty": p.get("qty") or 0, "rate": round(p.get("rate") or 0),
                           "amount": round(p.get("amount") or 0), "imei": p.get("imei")})
+    # match this model's sales by model name OR by the IMEIs of its units — the sale CSV's model
+    # text can differ from the purchase CSV's, so IMEI is the reliable link for serial-tracked stock
+    sq = {"company_id": company, "model": model}
+    if imeis:
+        sq = {"company_id": company, "$or": [{"model": model}, {"imei": {"$in": imeis}}]}
     seens, sales = set(), []
-    async for s in db.sales.find({"company_id": company, "model": model}).sort("date", -1):
+    async for s in db.sales.find(sq).sort("date", -1):
         k = sale_key(s)
         if k in seens:
             continue
@@ -612,7 +621,7 @@ async def model_history(model: str, company=Depends(current_company), _=Depends(
     su = sum(1 if s["imei"] else (s["qty"] or 0) for s in sales)
     return {"model": model, "brand": brand, "available": avail, "total": total,
             "purchased": {"units": int(pu), "value": round(sum(p["amount"] for p in purchases))},
-            "sold": {"units": int(su), "value": round(sum(s["amount"] for s in sales))},
+            "sold": {"units": int(max(su, sold_from_stock)), "value": round(sum(s["amount"] for s in sales))},
             "purchases": purchases[:300], "sales": sales[:300]}
 
 
