@@ -186,6 +186,9 @@ async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
     cash_undeposited = sum(p["amount"] for p in field_pays
                            if p["mode"] == "Cash" and not p.get("deposited") and p["status"] == "cleared")
     cheques_pending = sum(p["amount"] for p in field_pays if p["status"] == "pending")
+    cheques_pending_count = sum(1 for p in field_pays if p["status"] == "pending")
+    cash_undeposited_count = sum(1 for p in field_pays
+                                 if p["mode"] == "Cash" and not p.get("deposited") and p["status"] == "cleared")
     users = [u async for u in db.users.find({"role": "collector"})]
     users = [u for u in users if company in (u.get("company_ids") or [])] or users
     per_collector = []
@@ -203,7 +206,9 @@ async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
         dd = (today_d - timedelta(days=i)).isoformat()
         daily.append({"date": dd, "amount": sum(p["amount"] for p in field_pays if p["date"] == dd and p["status"] != "bounced")})
     top_overdue = sorted(overdue_rows, key=lambda r: (-r["oldest_due"], -r["outstanding"]))[:8]
+    overdue_count = len(overdue_rows)
     return {"hidden_dealers": hidden_count, "total_outstanding": total_out, "over_90_days": over90, "collected_today": collected_today,
             "collected_week": collected_week, "collected_month": collected_month, "daily": daily,
             "top_overdue": top_overdue, "ageing": ageing_total, "cash_undeposited": cash_undeposited, "cheques_pending": cheques_pending,
+            "cheques_pending_count": cheques_pending_count, "cash_undeposited_count": cash_undeposited_count, "overdue_count": overdue_count,
             "pending_approvals": pending_count, "per_collector": per_collector}
