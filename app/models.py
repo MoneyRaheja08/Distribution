@@ -115,6 +115,7 @@ class CollectIn(BaseModel):
     cheque: Optional[str] = None
     cheque_date: Optional[str] = None   # post-dated cheque (YYYY-MM-DD)
     collected_by: Optional[str] = None  # staff attributing the collection to a specific collector
+    date: Optional[str] = None          # staff backdating the collection date (YYYY-MM-DD)
 
 
 class ChequeUpdate(BaseModel):
