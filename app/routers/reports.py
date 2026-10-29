@@ -197,6 +197,72 @@ async def bill_ageing(company=Depends(current_company), _=Depends(admin)):
     return {"dealers": result}
 
 
+@router.get("/owed-by-brand")
+async def owed_by_brand(company=Depends(current_company), _=Depends(admin)):
+    """Outstanding split by brand. Each still-unpaid bill (payments applied oldest-first)
+    is split across the brands on that bill, by line value. Bills with no item/brand data
+    (manual, statement, opening, bulk) are reported under 'Unknown' and listed by bill number."""
+    UNK = "Unknown"   # bills with no item/brand data, and sale lines with a blank brand
+
+    def norm(x):
+        return (x or "").strip().lower()
+
+    dealers = [d async for d in db.dealers.find({"company_id": company})]
+    bills_by, pays_by = {}, {}
+    async for b in db.bills.find({"company_id": company}):
+        bills_by.setdefault(b["dealer_id"], []).append(b)
+    async for p in db.payments.find({"company_id": company}):
+        pays_by.setdefault(p["dealer_id"], []).append(p)
+    # (dealer_id, normalized bill_no) -> {brand: line value}
+    sales_by = {}
+    async for s in db.sales.find({"company_id": company}, {"dealer_id": 1, "bill_no": 1, "brand": 1, "amount": 1}):
+        key = (s.get("dealer_id"), norm(s.get("bill_no")))
+        brand = (s.get("brand") or "").strip().upper() or UNK
+        sales_by.setdefault(key, {})
+        sales_by[key][brand] = sales_by[key].get(brand, 0.0) + float(s.get("amount") or 0)
+
+    brand_totals = {}
+    dealer_rows = []
+    for d in dealers:
+        did = d["_id"]
+        unpaid_bills = bill_breakdown(bills_by.get(did, []), pays_by.get(did, []))
+        if not unpaid_bills:
+            continue
+        by_brand, old_bills, d_total = {}, [], 0
+        for ub in unpaid_bills:
+            unpaid = ub["unpaid"]
+            d_total += unpaid
+            mix = sales_by.get((did, norm(ub["bill_no"])))
+            tot = sum(mix.values()) if mix else 0
+            if mix and tot > 0:
+                items = list(mix.items())
+                allocated = 0
+                for i, (brand, val) in enumerate(items):
+                    part = (unpaid - allocated) if i == len(items) - 1 else round(unpaid * val / tot)
+                    allocated += part
+                    by_brand[brand] = by_brand.get(brand, 0) + part
+                    brand_totals[brand] = brand_totals.get(brand, 0) + part
+            else:
+                by_brand[UNK] = by_brand.get(UNK, 0) + unpaid
+                brand_totals[UNK] = brand_totals.get(UNK, 0) + unpaid
+                old_bills.append({"bill_no": ub["bill_no"], "date": ub["date"], "unpaid": round(unpaid)})
+        dealer_rows.append({
+            "dealer_id": did, "name": d["name"], "area": d.get("area"),
+            "total": round(d_total), "by_brand": {k: round(v) for k, v in by_brand.items()},
+            "old_bills": sorted(old_bills, key=lambda x: (x["date"] or "")),
+        })
+    # brand summary: known brands by size desc, Unknown always last
+    unk_total = round(brand_totals.pop(UNK, 0))
+    brand_summary = [{"brand": b, "outstanding": round(v)} for b, v in
+                     sorted(brand_totals.items(), key=lambda kv: -kv[1]) if round(v) != 0]
+    if unk_total != 0:
+        brand_summary.append({"brand": UNK, "outstanding": unk_total})
+    total_out = round(sum(r["total"] for r in dealer_rows))
+    dealer_rows.sort(key=lambda r: -r["total"])
+    return {"total_outstanding": total_out, "brands": brand_summary,
+            "all_brands": [b["brand"] for b in brand_summary], "dealers": dealer_rows}
+
+
 @router.get("/bills")
 async def bills_report(frm: str = Query(alias="from"), to: str = Query(...), source: Optional[str] = None,
                        company=Depends(current_company), _=Depends(admin)):
