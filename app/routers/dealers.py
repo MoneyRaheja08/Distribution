@@ -12,6 +12,7 @@ from ..ledger import compute, bill_breakdown
 from ..models import BillIn, BulkBills, DealerIn, DealerPatch, MergeIn, SeedIn, VisitIn
 from ..serializers import public_dealer
 from .targets import achievement, target_pub
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/dealers", tags=["dealers"])
 staff_only = require_roles("admin", "manager")
@@ -33,7 +34,7 @@ async def list_dealers(company=Depends(current_company), user=Depends(get_curren
         bills_by.setdefault(b["dealer_id"], []).append(b)
     async for p in db.payments.find({"dealer_id": {"$in": ids}}):
         pays_by.setdefault(p["dealer_id"], []).append(p)
-    today = date.today().isoformat()
+    today = today_ist().isoformat()
     visited = set()
     async for v in db.visits.find({"user_id": user["_id"], "date": today}):
         visited.add(v["dealer_id"])
@@ -89,7 +90,7 @@ async def get_dealer(did: str, company=Depends(current_company), user=Depends(ge
         raise HTTPException(404, "Dealer not found")
     if not is_staff(user) and d.get("collector_id") != user["_id"]:
         raise HTTPException(403, "Not your dealer")
-    today = date.today().isoformat()
+    today = today_ist().isoformat()
     v = await db.visits.find_one({"user_id": user["_id"], "dealer_id": did, "date": today})
     return public_dealer(d, await _summary(did), bool(v))
 
@@ -124,7 +125,7 @@ async def dealer_ledger(did: str, company=Depends(current_company), user=Depends
         bal += r["debit"] - r["credit"]
         r["balance"] = round(bal)
     summ = compute(bills, pays)
-    today = date.today().isoformat()
+    today = today_ist().isoformat()
     tdocs = []
     async for t in db.dealer_targets.find({"dealer_id": did, "company_id": company}):
         if (t.get("date_to") or "") >= today:
@@ -149,7 +150,7 @@ async def create_dealer(body: DealerIn, opening_balance: float = 0, company=Depe
     await db.dealers.insert_one(d)
     if opening_balance and opening_balance > 0:
         await db.bills.insert_one({"_id": uuid.uuid4().hex, "dealer_id": did, "bill_no": "Opening",
-                                   "date": date.today().isoformat(), "amount": opening_balance, "source": "opening", "company_id": company})
+                                   "date": today_ist().isoformat(), "amount": opening_balance, "source": "opening", "company_id": company})
     return public_dealer(d, await _summary(did))
 
 
@@ -258,7 +259,7 @@ async def mark_visited(did: str, body: VisitIn = Body(default=VisitIn()), compan
         raise HTTPException(404, "Dealer not found")
     if not is_staff(user) and d.get("collector_id") != user["_id"]:
         raise HTTPException(403, "Not your dealer")
-    today = date.today().isoformat()
+    today = today_ist().isoformat()
     now = datetime.now(timezone.utc)
     insert = {"_id": uuid.uuid4().hex, "dealer_id": did, "dealer_name": d["name"], "company_id": company,
               "user_id": user["_id"], "user_name": user["name"], "role": user["role"],

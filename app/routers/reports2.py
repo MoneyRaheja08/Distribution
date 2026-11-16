@@ -8,9 +8,10 @@ from pydantic import BaseModel
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, bill_breakdown, _parse, brand_match, sale_key, purchase_key
+from ..ledger import compute, bill_breakdown, _parse, brand_match, brand_match_any, sale_key, purchase_key
 from ..costlib import cost_override_map
 from .reports import admin, sales_perm, profit_perm, digest_perm
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -32,7 +33,7 @@ async def _ledger_ctx(company):
 
 def _fifo(bills, payments, today=None):
     """Per bill: paid_date (when FIFO payments fully covered it) and delay days."""
-    today = today or date.today()
+    today = today or today_ist()
     bs = sorted(bills, key=lambda b: b.get("date") or "9999")
     ps = sorted(payments, key=lambda p: p.get("date") or "9999")
     pi, avail = 0, 0.0
@@ -76,10 +77,13 @@ async def _cost_ctx(company):
 
 
 async def _sales(company, frm, to, brand=""):
+    # brand may be a single string or a list of brands (empty = all)
+    brands = brand if isinstance(brand, (list, tuple)) else ([brand] if brand else [])
+    brands = [b for b in brands if b]
     q = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
     seen, out = set(), []
     async for s in db.sales.find(q).sort("created_at", 1):
-        if brand and not brand_match(s, brand):
+        if brands and not brand_match_any(s, brands):
             continue
         key = (s.get("bill_no"), s.get("imei")) if s.get("imei") else (s.get("bill_no"), s.get("model"), s.get("qty"), s.get("amount"))
         if key in seen:
@@ -90,7 +94,8 @@ async def _sales(company, frm, to, brand=""):
 
 # 4. Dealer scorecard 2.0 -------------------------------------------------------------
 @router.get("/profit-by-dealer")
-async def profit_by_dealer(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
+async def profit_by_dealer(frm: str = Query(alias="from"), to: str = Query(...),
+                           brand: list[str] = Query(default=[]),
                            company=Depends(current_company), _=Depends(profit_perm)):
     cost_of = await _cost_ctx(company)
     sales = await _sales(company, frm, to, brand)
@@ -117,7 +122,7 @@ async def profit_by_dealer(frm: str = Query(alias="from"), to: str = Query(...),
              "units": v["units"], "bills": len(v["bills"])} for v in by.values()]
     rows.sort(key=lambda x: -x["margin"])
     brands = sorted(b for b in await db.sales.distinct("brand", {"company_id": company}) if b)
-    return {"from": frm, "to": to, "brand": brand.upper(), "brands": brands,
+    return {"from": frm, "to": to, "brand": [b.upper() for b in brand], "brands": brands,
             "units": units, "total_sale": round(tot_sale), "total_cost": round(tot_cost),
             "total_margin": round(tot_sale - tot_cost),
             "total_margin_pct": round((tot_sale - tot_cost) / tot_sale * 100, 1) if tot_sale else 0,
@@ -126,7 +131,7 @@ async def profit_by_dealer(frm: str = Query(alias="from"), to: str = Query(...),
 
 @router.get("/profit-by-dealer/detail")
 async def profit_by_dealer_detail(frm: str = Query(alias="from"), to: str = Query(...), dealer: str = Query(...),
-                                  brand: str = "", company=Depends(current_company), _=Depends(profit_perm)):
+                                  brand: list[str] = Query(default=[]), company=Depends(current_company), _=Depends(profit_perm)):
     """Drill-down for one dealer: every billed line with sale rate, NLC (cost) and margin —
     so you can see exactly how the dealer's margin was computed."""
     cost_of = await _cost_ctx(company)
@@ -152,7 +157,7 @@ async def profit_by_dealer_detail(frm: str = Query(alias="from"), to: str = Quer
         b["margin_pct"] = round(b["margin"] / b["sale"] * 100, 1) if b["sale"] else 0
         rows.append(b)
     rows.sort(key=lambda x: (x.get("date") or ""))
-    return {"dealer": dealer, "from": frm, "to": to, "brand": brand.upper(),
+    return {"dealer": dealer, "from": frm, "to": to, "brand": [b.upper() for b in brand],
             "sale": round(sum(r["sale"] for r in rows)), "cost": round(sum(r["cost"] for r in rows)),
             "margin": round(sum(r["margin"] for r in rows)), "bills": len(rows), "rows": rows}
 async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
@@ -229,7 +234,7 @@ async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
 @router.get("/credit-trend")
 async def credit_trend(months: int = 6, company=Depends(current_company), _=Depends(admin)):
     dealers, bills_by, pays_by = await _ledger_ctx(company)
-    today = date.today()
+    today = today_ist()
     mlist = []
     y, m = today.year, today.month
     for _i in range(months):
@@ -273,7 +278,7 @@ async def credit_trend(months: int = 6, company=Depends(current_company), _=Depe
 @router.get("/inactive-dealers")
 async def inactive_dealers(days: int = 30, company=Depends(current_company), _=Depends(sales_perm)):
     dealers, bills_by, pays_by = await _ledger_ctx(company)
-    today = date.today()
+    today = today_ist()
     rows = []
     for did, d in dealers.items():
         bl = bills_by.get(did, [])
@@ -315,7 +320,7 @@ def _shift(mo, k):
 
 @router.get("/mom")
 async def month_on_month(month: str = "", by: str = "brand", company=Depends(current_company), _=Depends(sales_perm)):
-    month = month or date.today().strftime("%Y-%m")
+    month = month or today_ist().strftime("%Y-%m")
     cost_of = await _cost_ctx(company)
     key = {"brand": "brand", "group": "group", "dealer": "dealer_name", "model": "model"}.get(by, "brand")
     periods = {"cur": month, "prev": _shift(month, -1), "ly": _shift(month, -12)}
@@ -417,7 +422,7 @@ async def price_realisation(frm: str = Query(alias="from"), to: str = Query(...)
 @router.get("/cashflow")
 async def cashflow_forecast(company=Depends(current_company), _=Depends(admin)):
     dealers, bills_by, pays_by = await _ledger_ctx(company)
-    today = date.today()
+    today = today_ist()
     weeks = [{"label": "This week", "from": 0, "to": 7, "amount": 0.0},
              {"label": "Week 2", "from": 8, "to": 14, "amount": 0.0},
              {"label": "Week 3", "from": 15, "to": 21, "amount": 0.0},
@@ -625,7 +630,7 @@ async def scheme_achievement(company, month):
     out = []
     async for sc in db.schemes.find({"company_id": company, "$or": [{"month": month}, {"date_from": {"$lte": mb, "$ne": ""}, "date_to": {"$gte": ma}}]}):
         a, b = (sc["date_from"], sc["date_to"]) if sc.get("date_from") and sc.get("date_to") else (ma, mb)
-        d1 = _parse(a); d2 = min(_parse(b), date.today())
+        d1 = _parse(a); d2 = min(_parse(b), today_ist())
         progress = max(1, (d2 - d1).days + 1) / max(1, (_parse(b) - d1).days + 1) * 100
         qty = amt = 0.0
         pool = await pool_for(a, b, sc.get("basis") or "purchase")
@@ -677,10 +682,10 @@ async def scheme_achievement(company, month):
 
 @router.get("/schemes")
 async def schemes_list(month: str = "", company=Depends(current_company), _=Depends(profit_perm)):
-    month = month or date.today().strftime("%Y-%m")
+    month = month or today_ist().strftime("%Y-%m")
     rows = await scheme_achievement(company, month)
     a, b = _month_range(month)
-    d1 = _parse(a); d2 = min(_parse(b), date.today())
+    d1 = _parse(a); d2 = min(_parse(b), today_ist())
     elapsed = max(1, (d2 - d1).days + 1); total_days = (_parse(b) - d1).days + 1
     # Models/categories/brands can be scheme-tracked on PURCHASES too, so union sales + purchases
     groups = sorted({g for g in (await db.sales.distinct("group", {"company_id": company})
@@ -716,7 +721,7 @@ async def scheme_status(sid: str, body: SchemeStatus, company=Depends(current_co
     if body.status not in ("open", "claimed", "received"):
         raise HTTPException(400, "status must be open, claimed or received")
     upd = {"status": body.status, "received_amount": body.received_amount if body.status == "received" else 0,
-           "received_on": (body.received_on or date.today().isoformat()) if body.status == "received" else None}
+           "received_on": (body.received_on or today_ist().isoformat()) if body.status == "received" else None}
     if body.note:
         upd["status_note"] = body.note
     r = await db.schemes.update_one({"_id": sid, "company_id": company}, {"$set": upd})
@@ -751,7 +756,7 @@ async def schemes_earned(frm: str = Query(alias="from"), to: str = Query(...), b
 # 13. Daily digest ---------------------------------------------------------------------------
 @router.get("/digest")
 async def daily_digest(day: str = "", company=Depends(current_company), _=Depends(digest_perm)):
-    day = day or (date.today() - timedelta(days=1)).isoformat()
+    day = day or (today_ist() - timedelta(days=1)).isoformat()
     dealers, bills_by, pays_by = await _ledger_ctx(company)
     sales = await _sales(company, day, day)
     sale_total = sum(s.get("amount", 0) or 0 for s in sales)
@@ -775,9 +780,9 @@ async def daily_digest(day: str = "", company=Depends(current_company), _=Depend
             top.append({"dealer": d.get("name"), "outstanding": led["outstanding"], "age_90p": led["ageing"]["age_90p"]})
     top.sort(key=lambda x: -x["age_90p"] or -x["outstanding"])
     # low stock: models sold in last 30 days with <=2 units on hand
-    since = (date.today() - timedelta(days=30)).isoformat()
+    since = (today_ist() - timedelta(days=30)).isoformat()
     sold_recent = {}
-    for s in await _sales(company, since, date.today().isoformat()):
+    for s in await _sales(company, since, today_ist().isoformat()):
         sold_recent[s.get("model")] = sold_recent.get(s.get("model"), 0) + (1 if s.get("imei") else (s.get("qty") or 0))
     on_hand = {}
     async for u in db.stock_units.find({"company_id": company, "status": "in_stock"}, {"model": 1}):
@@ -804,7 +809,7 @@ async def dashboard_access(user=Depends(get_current_user)):
 
 @router.get("/dashboard")
 async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_access)):
-    today = date.today(); tiso = today.isoformat()
+    today = today_ist(); tiso = today.isoformat()
     m_start = tiso[:7] + "-01"
     # Run all independent, read-only sub-queries concurrently (was serial -> ~3.6s).
     (dealers, bills_by, pays_by), cost_of, mtd_sales, cf, tr, ina, sch, dg, pending_appr = await asyncio.gather(
@@ -886,7 +891,7 @@ async def admin_dashboard(company=Depends(current_company), _=Depends(dashboard_
 async def stock_planner(brand: str = "", lead_days: int = 7, cover_days: int = 30,
                         company=Depends(current_company), _=Depends(sales_perm)):
     import math
-    today = date.today(); tiso = today.isoformat()
+    today = today_ist(); tiso = today.isoformat()
     d7 = (today - timedelta(days=6)).isoformat(); d30 = (today - timedelta(days=29)).isoformat()
     sku = {}
 

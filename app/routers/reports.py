@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
-from ..ledger import compute, bill_breakdown, brand_match, brand_query, sale_key, purchase_key
+from ..ledger import compute, bill_breakdown, brand_match, brand_match_any, brand_query, brand_query_multi, sale_key, purchase_key
 from ..costlib import cost_override_map
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -213,13 +213,38 @@ async def owed_by_brand(company=Depends(current_company), _=Depends(admin)):
         bills_by.setdefault(b["dealer_id"], []).append(b)
     async for p in db.payments.find({"company_id": company}):
         pays_by.setdefault(p["dealer_id"], []).append(p)
-    # (dealer_id, normalized bill_no) -> {brand: line value}
-    sales_by = {}
+    # (dealer_id, normalized bill_no) -> {brand: line value} from imported sale lines
+    sales_by, sale_brands = {}, set()
     async for s in db.sales.find({"company_id": company}, {"dealer_id": 1, "bill_no": 1, "brand": 1, "amount": 1}):
         key = (s.get("dealer_id"), norm(s.get("bill_no")))
         brand = (s.get("brand") or "").strip().upper() or UNK
         sales_by.setdefault(key, {})
         sales_by[key][brand] = sales_by[key].get(brand, 0.0) + float(s.get("amount") or 0)
+        if brand != UNK:
+            sale_brands.add(brand)
+    # full bill docs, to read manually-tagged brand_split and bill ids
+    bill_meta, split_brands = {}, set()
+    for did, bl in bills_by.items():
+        for b in bl:
+            bill_meta[(did, norm(b.get("bill_no")))] = b
+            for it in (b.get("brand_split") or []):
+                br = (it.get("brand") or "").strip().upper()
+                if br:
+                    split_brands.add(br)
+
+    def mix_from_split(bdoc, bill_amount):
+        """Brand mix from a bill's manual brand_split; any untagged remainder -> Unknown."""
+        bs = bdoc.get("brand_split") if bdoc else None
+        if not bs:
+            return None
+        m = {}
+        for it in bs:
+            br = (it.get("brand") or "").strip().upper() or UNK
+            m[br] = m.get(br, 0) + float(it.get("amount") or 0)
+        rem = float(bill_amount) - sum(m.values())
+        if rem > 1:
+            m[UNK] = m.get(UNK, 0) + rem
+        return m
 
     brand_totals = {}
     dealer_rows = []
@@ -232,8 +257,13 @@ async def owed_by_brand(company=Depends(current_company), _=Depends(admin)):
         for ub in unpaid_bills:
             unpaid = ub["unpaid"]
             d_total += unpaid
-            mix = sales_by.get((did, norm(ub["bill_no"])))
+            key = (did, norm(ub["bill_no"]))
+            bdoc = bill_meta.get(key)
+            mix = sales_by.get(key)
             tot = sum(mix.values()) if mix else 0
+            if not (mix and tot > 0):                 # no sale lines -> try manual brand_split
+                mix = mix_from_split(bdoc, ub["amount"])
+                tot = sum(mix.values()) if mix else 0
             if mix and tot > 0:
                 items = list(mix.items())
                 allocated = 0
@@ -242,10 +272,11 @@ async def owed_by_brand(company=Depends(current_company), _=Depends(admin)):
                     allocated += part
                     by_brand[brand] = by_brand.get(brand, 0) + part
                     brand_totals[brand] = brand_totals.get(brand, 0) + part
-            else:
+            else:                                     # still no brand info -> needs tagging
                 by_brand[UNK] = by_brand.get(UNK, 0) + unpaid
                 brand_totals[UNK] = brand_totals.get(UNK, 0) + unpaid
-                old_bills.append({"bill_no": ub["bill_no"], "date": ub["date"], "unpaid": round(unpaid)})
+                old_bills.append({"id": (bdoc or {}).get("_id"), "bill_no": ub["bill_no"],
+                                  "date": ub["date"], "amount": ub["amount"], "unpaid": round(unpaid)})
         dealer_rows.append({
             "dealer_id": did, "name": d["name"], "area": d.get("area"),
             "total": round(d_total), "by_brand": {k: round(v) for k, v in by_brand.items()},
@@ -259,8 +290,10 @@ async def owed_by_brand(company=Depends(current_company), _=Depends(admin)):
         brand_summary.append({"brand": UNK, "outstanding": unk_total})
     total_out = round(sum(r["total"] for r in dealer_rows))
     dealer_rows.sort(key=lambda r: -r["total"])
+    known_brands = sorted((sale_brands | split_brands | set(brand_totals.keys())) - {UNK})
     return {"total_outstanding": total_out, "brands": brand_summary,
-            "all_brands": [b["brand"] for b in brand_summary], "dealers": dealer_rows}
+            "all_brands": [b["brand"] for b in brand_summary], "dealers": dealer_rows,
+            "known_brands": known_brands}
 
 
 @router.get("/bills")
@@ -279,15 +312,27 @@ async def bills_report(frm: str = Query(alias="from"), to: str = Query(...), sou
 
 
 @router.get("/sales")
-async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: str = "", brand: str = "",
-                       dealer: str = "", model: str = "",
+async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: str = "",
+                       brand: list[str] = Query(default=[]), dealer: list[str] = Query(default=[]),
+                       model: list[str] = Query(default=[]), group: list[str] = Query(default=[]),
                        company=Depends(current_company), _=Depends(sales_perm)):
     import re as _re
     query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
     rx = _re.compile(_re.escape(q), _re.I) if q else None
-    bsel, dsel, msel = brand.strip().upper(), dealer.strip(), model.strip()
+    # each filter is a list (repeated query params); empty = All. A row passes if it matches ANY selected value.
+    def _multi(vals):
+        if not isinstance(vals, (list, tuple)):
+            return []
+        out = []
+        for v in vals:
+            out += [x.strip() for x in str(v).split(",") if x.strip()]
+        return out
+    bsel = [b.upper() for b in _multi(brand)]
+    dsel = set(_multi(dealer))
+    msel = set(_multi(model))
+    gsel = set(g.upper() for g in _multi(group))
     rows, total, units, by_dealer, by_model = [], 0.0, 0, {}, {}
-    all_dealers, all_models, all_brands = set(), set(), set()
+    all_dealers, all_models, all_brands, all_groups = set(), set(), set(), set()
     seen, dups = {}, 0
     async for s in db.sales.find(query).sort([("date", -1), ("created_at", 1)]):
         k = sale_key(s); bt = s.get("import_batch") or ""
@@ -295,16 +340,22 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
             dups += 1
             continue
         seen[k] = bt
-        if s.get("dealer_name"): all_dealers.add(s["dealer_name"])
-        if s.get("model"): all_models.add(s["model"])
-        if s.get("brand"): all_brands.add(s["brand"])
-        if bsel and not brand_match(s, bsel):
-            continue
-        if dsel and (s.get("dealer_name") or "") != dsel:
-            continue
-        if msel and (s.get("model") or "") != msel:
-            continue
-        if rx and not (rx.search(s.get("model") or "") or rx.search(s.get("dealer_name") or "") or rx.search(s.get("imei") or "")):
+        grp = s.get("group") or s.get("sub_group") or ""
+        dealer_name = s.get("dealer_name") or ""
+        model_name = s.get("model") or ""
+        brand_name = s.get("brand") or ""
+        # does this row pass each facet on its own?
+        pb = (not bsel) or any(brand_match(s, b) for b in bsel)
+        pd = (not dsel) or (dealer_name in dsel)
+        pg = (not gsel) or (grp.upper() in gsel)
+        pm = (not msel) or (model_name in msel)
+        pq = (not rx) or bool(rx.search(model_name) or rx.search(dealer_name) or rx.search(s.get("imei") or ""))
+        # cascading options: offer a value only if the row passes all the OTHER facets
+        if dealer_name and pb and pg and pm and pq: all_dealers.add(dealer_name)
+        if brand_name and pd and pg and pm and pq: all_brands.add(brand_name)
+        if grp and pb and pd and pm and pq: all_groups.add(grp)
+        if model_name and pb and pd and pg and pq: all_models.add(model_name)
+        if not (pb and pd and pg and pm and pq):
             continue
         amt = s.get("amount", 0); total += amt
         if s.get("imei"):
@@ -317,7 +368,7 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
         m = by_model.setdefault(s.get("model") or "—", {"model": s.get("model") or "—", "brand": s.get("brand"), "group": s.get("group") or s.get("sub_group") or "", "amount": 0, "qty": 0})
         m["amount"] += amt; m["qty"] += s.get("qty", 0) or 1
     return {"from": frm, "to": to, "total": round(total), "units": units, "count": len(rows), "rows": rows[:2000], "duplicates_ignored": dups,
-            "dealers": sorted(all_dealers), "models": sorted(all_models), "brands": sorted(all_brands),
+            "dealers": sorted(all_dealers), "models": sorted(all_models), "brands": sorted(all_brands), "groups": sorted(all_groups),
             "by_dealer": [{"dealer": k, "amount": round(v["amount"]), "qty": v["qty"]}
                           for k, v in sorted(by_dealer.items(), key=lambda x: -x[1]["amount"])],
             "by_model": [{"model": v["model"], "brand": v["brand"], "group": v["group"], "amount": round(v["amount"]), "qty": v["qty"]}
@@ -325,11 +376,11 @@ async def sales_report(frm: str = Query(alias="from"), to: str = Query(...), q: 
 
 
 @router.get("/purchases-brand")
-async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
+async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query(...),
+                                 brand: list[str] = Query(default=[]),
                                  company=Depends(current_company), _=Depends(sales_perm)):
     query = {"company_id": company, "date": {"$gte": frm, "$lte": to}}
-    if brand:
-        query.update(brand_query(brand))
+    query.update(brand_query_multi(brand))
     total, by_brand, by_month, by_cat = 0.0, {}, {}, {}
     seen = {}
     async for p in db.purchases.find(query).sort("created_at", 1):
@@ -342,18 +393,19 @@ async def purchases_brand_report(frm: str = Query(alias="from"), to: str = Query
         b = by_brand.setdefault(p.get("brand") or "—", {"amount": 0, "qty": 0}); b["amount"] += amt; b["qty"] += qty
         mm = by_month.setdefault((p.get("date") or "")[:7] or "—", {"amount": 0, "qty": 0}); mm["amount"] += amt; mm["qty"] += qty
         cc = by_cat.setdefault(p.get("group") or p.get("sub_group") or "Other", {"amount": 0, "qty": 0}); cc["amount"] += amt; cc["qty"] += qty
-    return {"from": frm, "to": to, "total": round(total),
+    all_brands = sorted(b for b in await db.purchases.distinct("brand", {"company_id": company}) if b)
+    return {"from": frm, "to": to, "total": round(total), "brands": all_brands,
             "by_brand": [{"brand": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_brand.items(), key=lambda x: -x[1]["amount"])],
             "by_month": [{"month": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_month.items())],
             "by_category": [{"group": k, "amount": round(v["amount"]), "qty": v["qty"]} for k, v in sorted(by_cat.items(), key=lambda x: -x[1]["amount"])]}
 
 
 @router.get("/profit")
-async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "",
+async def profit_report(frm: str = Query(alias="from"), to: str = Query(...),
+                        brand: list[str] = Query(default=[]),
                         company=Depends(current_company), _=Depends(profit_perm)):
     query = {"company_id": company, "status": "sold", "sale_date": {"$gte": frm, "$lte": to}}
-    if brand:
-        query.update(brand_query(brand))
+    query.update(brand_query_multi(brand))
     by_model, tot_sale, tot_cost, units = {}, 0.0, 0.0, 0
     by_month = {}
     async for u in db.stock_units.find(query):
@@ -369,7 +421,7 @@ async def profit_report(frm: str = Query(alias="from"), to: str = Query(...), br
              "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])} for v in by_model.values()]
     rows.sort(key=lambda x: -x["margin"])
     brands = sorted(b for b in await db.stock_units.distinct("brand", {"company_id": company}) if b)
-    return {"from": frm, "to": to, "brand": brand.upper(), "brands": brands,
+    return {"from": frm, "to": to, "brand": [b.upper() for b in brand], "brands": brands,
             "units": units, "total_sale": round(tot_sale), "total_cost": round(tot_cost),
             "total_margin": round(tot_sale - tot_cost), "rows": rows,
             "by_month": [{"month": k, "sale": round(v["sale"]), "cost": round(v["cost"]), "margin": round(v["sale"] - v["cost"])}
@@ -591,9 +643,16 @@ async def brand_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
 
 
 @router.get("/top-performers")
-async def top_performers(frm: str = Query(alias="from"), to: str = Query(...), brand: str = "", group: str = "",
-                         dealer: str = "", limit: int = 10,
+async def top_performers(frm: str = Query(alias="from"), to: str = Query(...),
+                         brand: list[str] = Query(default=[]), group: list[str] = Query(default=[]),
+                         dealer: list[str] = Query(default=[]), limit: int = 10,
                          company=Depends(current_company), _=Depends(sales_perm)):
+    def _m(vals):
+        out = []
+        for v in (vals if isinstance(vals, (list, tuple)) else []):
+            out += [x.strip() for x in str(v).split(",") if x.strip()]
+        return out
+    bsel = _m(brand); gsel = set(g.upper() for g in _m(group)); dsel = set(_m(dealer))
     skus, deal = {}, {}
     seen, brands, groups, dealers = {}, set(), set(), set()
     async for s in db.sales.find({"company_id": company, "date": {"$gte": frm, "$lte": to}}).sort("created_at", 1):
@@ -601,14 +660,16 @@ async def top_performers(frm: str = Query(alias="from"), to: str = Query(...), b
         if k in seen and seen[k] != bt:
             continue
         seen[k] = bt
-        if s.get("brand"): brands.add(s["brand"])
-        if s.get("group"): groups.add(s["group"])
-        if s.get("dealer_name"): dealers.add(s["dealer_name"])
-        if brand and not brand_match(s, brand):
-            continue
-        if group and (s.get("group") or "") != group:
-            continue
-        if dealer and (s.get("dealer_name") or "") != dealer:
+        grp = s.get("group") or ""
+        dealer_name = s.get("dealer_name") or ""
+        brand_name = s.get("brand") or ""
+        pb = brand_match_any(s, bsel)
+        pg = (not gsel) or (grp.upper() in gsel)
+        pd = (not dsel) or (dealer_name in dsel)
+        if brand_name and pg and pd: brands.add(brand_name)
+        if grp and pb and pd: groups.add(grp)
+        if dealer_name and pb and pg: dealers.add(dealer_name)
+        if not (pb and pg and pd):
             continue
         amt = s.get("amount", 0); qty = s.get("qty", 0) or 1
         k = s.get("model") or "—"

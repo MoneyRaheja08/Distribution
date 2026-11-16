@@ -9,6 +9,7 @@ from pymongo import ReturnDocument
 from ..auth import get_current_user, hash_pin
 from ..deps import current_company
 from ..db import db
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/dc", tags=["daily-collections"])
 
@@ -23,7 +24,7 @@ async def dc_company(company=Depends(current_company)):
 
 
 def _today():
-    return date.today().isoformat()
+    return today_ist().isoformat()
 
 
 def _is_admin(u):

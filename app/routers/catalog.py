@@ -11,6 +11,7 @@ from ..auth import get_current_user, require_roles, is_staff
 from ..db import db
 from ..deps import current_company
 from ..ledger import sale_key, purchase_key
+from ..timeutil import today_ist
 
 router = APIRouter(tags=["catalog"])
 staff_only = require_roles("admin", "manager")
@@ -657,8 +658,8 @@ async def stock_summary(company=Depends(current_company), user=Depends(get_curre
 
 @router.get("/catalog/aging-stock")
 async def aging_stock(days: int = 60, company=Depends(current_company), _=Depends(get_current_user)):
-    cutoff = (date.today() - timedelta(days=days)).isoformat()
-    today = date.today()
+    cutoff = (today_ist() - timedelta(days=days)).isoformat()
+    today = today_ist()
     rows = []
     async for u in db.stock_units.find({"company_id": company, "status": "in_stock",
                                         "purchase_date": {"$lte": cutoff, "$ne": None}}).limit(500):

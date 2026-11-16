@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from .timeutil import today_ist
 
 BUCKETS = ("age_0_30", "age_31_60", "age_61_90", "age_90p")
 
@@ -23,7 +24,7 @@ def bucket_for(days: int) -> str:
 def compute(bills, payments, today=None):
     """Outstanding + ageing from a dealer's bills and payments.
     Payments clear oldest bills first (FIFO); unpaid remainder ages by bill date."""
-    today = today or date.today()
+    today = today or today_ist()
     bills_sorted = sorted(bills, key=lambda b: (b.get("date") or "9999-99-99"))
     def counts(x):
         return x.get("status") != "bounced" and x.get("approved", True)
@@ -52,7 +53,7 @@ def compute(bills, payments, today=None):
 def bill_breakdown(bills, payments, today=None):
     """Per-bill ageing: each still-unpaid bill with its unpaid amount, age and bucket
     (payments applied oldest-first, same FIFO as compute)."""
-    today = today or date.today()
+    today = today or today_ist()
     bills_sorted = sorted(bills, key=lambda b: (b.get("date") or "9999-99-99"))
 
     def counts(x):
@@ -93,6 +94,22 @@ def brand_query(brand):
     import re
     rx = {"$regex": re.escape(brand.strip().upper()), "$options": "i"}
     return {"$or": [{"brand": rx}, {"group": rx}, {"model": rx}, {"supplier": rx}]}
+
+
+def brand_query_multi(brands):
+    """Mongo $or clause matching ANY of several brands (empty = no constraint)."""
+    clauses = []
+    for b in (brands or []):
+        if b and b.strip():
+            clauses += brand_query(b)["$or"]
+    return {"$or": clauses} if clauses else {}
+
+
+def brand_match_any(doc, brands):
+    """True if doc matches ANY of the brands (empty list = match all)."""
+    if not brands:
+        return True
+    return any(brand_match(doc, b) for b in brands)
 
 
 def sale_key(s):

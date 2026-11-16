@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from ..auth import require_roles
 from ..deps import current_company
 from ..db import db
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/visits", tags=["visits"])
 staff_only = require_roles("admin", "manager")
@@ -19,7 +20,7 @@ def _ist(dt):
 
 @router.get("/today")
 async def visits_today(company=Depends(current_company), _=Depends(staff_only)):
-    today = date.today().isoformat()
+    today = today_ist().isoformat()
     out = []
     async for v in db.visits.find({"date": today, "company_id": company}).sort("first_ts", 1):
         out.append({"dealer_name": v.get("dealer_name"), "user_name": v.get("user_name"),

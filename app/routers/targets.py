@@ -9,6 +9,7 @@ from ..auth import get_current_user, is_staff, require_roles
 from ..deps import current_company
 from ..db import db
 from ..ledger import _parse, brand_match
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/targets", tags=["targets"])
 admin_only = require_roles("admin")
@@ -55,7 +56,7 @@ def _is_opening(b):
 
 def compute_target(t, gross, today=None):
     """Achievement from a precomputed gross (window-filtered). basic = gross stripped of GST."""
-    today = today or date.today().isoformat()
+    today = today or today_ist().isoformat()
     frm, to = t.get("date_from"), t.get("date_to")
     gst = t.get("gst_pct", 0) or 0
     basic = gross / (1 + gst / 100) if gst else gross
@@ -142,7 +143,7 @@ async def list_targets(company=Depends(current_company), user=Depends(get_curren
             sid = s.get("dealer_id") if s.get("dealer_id") in bt_ids else id_by_name.get(s.get("dealer_name"))
             if sid:
                 sales_by.setdefault(sid, []).append(s)
-    today = date.today().isoformat()
+    today = today_ist().isoformat()
     rows = []
     for t in mine:
         d = dealers.get(t["dealer_id"]) or {}

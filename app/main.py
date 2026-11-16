@@ -1,16 +1,19 @@
+import traceback
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .config import settings
+from .config import check_production, settings
 from .db import db
-from .routers import auth, backup, bills, catalog, companies, costs, daily_collections, dealers, invoices, orders, payables, payments, pricelists, reports, reports2, stock, targets, users, visits
+from .routers import auth, backup, bills, catalog, cn, companies, costs, daily_collections, dealers, invoices, orders, payables, payments, pricelists, reports, reports2, stock, targets, users, visits
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    check_production()
     # Best-effort indexes; ignore if Mongo is briefly unreachable at boot.
     try:
         await db.users.create_index("name", unique=True)
@@ -60,6 +63,7 @@ app.include_router(stock.router)
 app.include_router(payments.router)
 app.include_router(pricelists.router)
 app.include_router(bills.router)
+app.include_router(cn.router)
 app.include_router(invoices.router)
 app.include_router(orders.router)
 app.include_router(visits.router)
@@ -75,14 +79,16 @@ app.include_router(costs.router)
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    # Ensure crashes still carry CORS headers so browsers surface the real
-    # error instead of an opaque "Failed to fetch" on cross-origin deploys.
-    origin = request.headers.get("origin", "*")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Server error: {type(exc).__name__}: {exc}"},
-        headers={"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true"},
-    )
+    # The full error goes to the server log (Render -> Logs) under a short reference; the browser
+    # gets only that reference. CORS headers are kept so the message still reaches the page.
+    ref = uuid.uuid4().hex[:8]
+    print(f"ERROR {ref} {request.method} {request.url.path}\n" + "".join(traceback.format_exception(exc)), flush=True)
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin and (origins == ["*"] or origin in origins):
+        headers = {"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true"}
+    return JSONResponse(status_code=500, headers=headers,
+                        content={"detail": f"Something went wrong on the server — please try again (ref {ref})"})
 
 
 @app.get("/health")

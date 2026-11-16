@@ -11,6 +11,7 @@ from ..db import db
 from ..ledger import compute, bill_breakdown
 from ..models import ApproveIn, ChequeUpdate, CollectIn, DepositIn, ReconcileIn
 from ..serializers import public_payment
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 staff_only = require_roles("admin", "manager")
@@ -58,13 +59,13 @@ async def record_collection(body: CollectIn, company=Depends(current_company), u
             raise HTTPException(400, "Selected collector is not in this company")
         coll_id, coll_name = cu["_id"], cu["name"]
     # Collection date: staff may backdate (e.g. manager enters yesterday's collection today)
-    pay_date = date.today().isoformat()
+    pay_date = today_ist().isoformat()
     if body.date and is_staff(user):
         try:
             pd = date.fromisoformat(body.date[:10])
         except ValueError:
             raise HTTPException(400, "Date must be YYYY-MM-DD")
-        if pd > date.today():
+        if pd > today_ist():
             raise HTTPException(400, "Collection date can't be in the future")
         pay_date = pd.isoformat()
     receipt = await _next_receipt()
@@ -99,13 +100,13 @@ async def list_payments(dealer_id: Optional[str] = None, status: Optional[str] =
 
 
 @router.patch("/{pid}/cheque")
-async def update_cheque(pid: str, body: ChequeUpdate, _=Depends(require_roles("admin"))):
-    p = await db.payments.find_one({"_id": pid})
+async def update_cheque(pid: str, body: ChequeUpdate, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    p = await db.payments.find_one({"_id": pid, "company_id": company})
     if not p:
         raise HTTPException(404, "Payment not found")
     if p["mode"] != "Cheque" or p["status"] != "pending":
         raise HTTPException(400, "Only pending cheques can be updated")
-    if body.cleared and p.get("cheque_date") and p["cheque_date"] > date.today().isoformat():
+    if body.cleared and p.get("cheque_date") and p["cheque_date"] > today_ist().isoformat():
         raise HTTPException(400, f"Post-dated cheque — can be cleared only on or after {p['cheque_date']}")
     await db.payments.update_one({"_id": pid}, {"$set": {"status": "cleared" if body.cleared else "bounced"}})
     return {"ok": True}
@@ -125,8 +126,8 @@ async def pending_approvals(company=Depends(current_company), _=Depends(staff_on
 
 
 @router.patch("/{pid}/approve")
-async def approve_payment(pid: str, body: ApproveIn, _=Depends(staff_only)):
-    p = await db.payments.find_one({"_id": pid})
+async def approve_payment(pid: str, body: ApproveIn, company=Depends(current_company), _=Depends(staff_only)):
+    p = await db.payments.find_one({"_id": pid, "company_id": company})
     if not p:
         raise HTTPException(404, "Payment not found")
     if p.get("approved", True):
@@ -139,8 +140,8 @@ async def approve_payment(pid: str, body: ApproveIn, _=Depends(staff_only)):
 
 
 @router.delete("/{pid}")
-async def delete_payment(pid: str, _=Depends(require_roles("admin"))):
-    r = await db.payments.delete_one({"_id": pid})
+async def delete_payment(pid: str, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    r = await db.payments.delete_one({"_id": pid, "company_id": company})
     if r.deleted_count == 0:
         raise HTTPException(404, "Payment not found")
     return {"ok": True}
@@ -157,8 +158,8 @@ async def collections(reconciled: Optional[bool] = None, company=Depends(current
 
 
 @router.patch("/{pid}/reconcile")
-async def reconcile_payment(pid: str, body: ReconcileIn, _=Depends(require_roles("admin"))):
-    r = await db.payments.update_one({"_id": pid}, {"$set": {"reconciled": body.reconciled}})
+async def reconcile_payment(pid: str, body: ReconcileIn, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    r = await db.payments.update_one({"_id": pid, "company_id": company}, {"$set": {"reconciled": body.reconciled}})
     if r.matched_count == 0:
         raise HTTPException(404, "Payment not found")
     return {"ok": True}
@@ -174,7 +175,7 @@ async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
     all_pays = [p async for p in db.payments.find({"company_id": company})]
     for p in all_pays:
         pays_by.setdefault(p["dealer_id"], []).append(p)
-    today_d = date.today()
+    today_d = today_ist()
     today = today_d.isoformat()
     total_out = over90 = 0
     ageing_total = {"age_0_30": 0, "age_31_60": 0, "age_61_90": 0, "age_90p": 0}

@@ -10,6 +10,7 @@ from ..db import db
 from ..models import ExecuteIn, OrderIn
 from ..serializers import public_order
 from ..ledger import sale_key
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 staff_only = require_roles("admin", "manager")
@@ -93,7 +94,7 @@ async def create_order(body: OrderIn, company=Depends(current_company), user=Dep
     total = sum((i["dp"] or 0) * i["qty"] for i in items)
     o = {"_id": uuid.uuid4().hex, "company_id": company, "dealer_id": dealer["_id"], "dealer_name": dealer["name"],
          "pricelist_name": body.pricelist_name or "", "note": body.note or "", "items": items, "total": round(total),
-         "status": "pending", "date": date.today().isoformat(), "ts": datetime.now(timezone.utc),
+         "status": "pending", "date": today_ist().isoformat(), "ts": datetime.now(timezone.utc),
          "created_by_id": user["_id"], "created_by_name": user["name"], "created_by_role": user["role"]}
     await db.orders.insert_one(o)
     return public_order(o)
@@ -108,7 +109,7 @@ async def execute_order(oid: str, body: ExecuteIn, company=Depends(current_compa
         raise HTTPException(400, "Order already executed")
     await db.orders.update_one({"_id": oid}, {"$set": {
         "status": "executed", "bill_no": (body.bill_no or "").strip(),
-        "executed_by": user["name"], "executed_date": date.today().isoformat()}})
+        "executed_by": user["name"], "executed_date": today_ist().isoformat()}})
     return {"ok": True}
 
 

@@ -233,6 +233,53 @@ class BulkBills(BaseModel):
     bills: list[BulkBillRow]
 
 
+class BrandSplitRow(BaseModel):
+    brand: str
+    amount: float = Field(gt=0)
+
+
+class BrandSplitIn(BaseModel):
+    splits: list[BrandSplitRow] = []
+
+
+class BrandImportRow(BaseModel):
+    dealer_name: Optional[str] = None
+    dealer_id: Optional[str] = None
+    bill_no: str
+    brand: str
+    amount: float = Field(gt=0)
+
+
+class BrandImport(BaseModel):
+    rows: list[BrandImportRow]
+
+
+class CnOverride(BaseModel):
+    model: str
+    old_price: Optional[float] = None   # manual Oct/base price when auto-compare can't resolve it
+    new_price: Optional[float] = None   # manual Nov/current price
+
+
+class CnComputeIn(BaseModel):
+    base_from: str
+    base_to: str
+    cur_from: str
+    cur_to: str
+    brand: list[str] = []
+    overrides: list[CnOverride] = []
+
+
+class CnRuleIn(BaseModel):
+    id: Optional[str] = None
+    name: str
+    base_from: str
+    base_to: str
+    cur_from: str
+    cur_to: str
+    brand: list[str] = []
+    overrides: list[CnOverride] = []
+
+
 class MergeIn(BaseModel):
     source_ids: list[str] = []
 

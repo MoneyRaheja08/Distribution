@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
+from ..timeutil import today_ist
 
 router = APIRouter(prefix="/payables", tags=["payables"])
 
@@ -79,7 +80,7 @@ async def payables(status: str = "outstanding", company=Depends(current_company)
         if d and (b["date"] is None or d < b["date"]):
             b["date"] = d
 
-    today = date.today()
+    today = today_ist()
     out = []
     for bno, b in bills.items():
         a = ap.get(bno, {})
@@ -140,7 +141,7 @@ async def patch_bill(body: BillPatch, company=Depends(current_company), _=Depend
         upd["credit_days"] = max(0, int(body.credit_days))
     if body.paid is not None:
         upd["paid"] = body.paid
-        upd["paid_on"] = (body.paid_on or date.today().isoformat()) if body.paid else None
+        upd["paid_on"] = (body.paid_on or today_ist().isoformat()) if body.paid else None
     elif body.paid_on is not None:
         upd["paid_on"] = body.paid_on
     if not upd:
