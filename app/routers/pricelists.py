@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo import ReturnDocument
 
+from ..audit import record as audit
 from ..auth import get_current_user, require_roles
 from ..deps import current_company
 from ..db import db
@@ -58,6 +59,11 @@ async def update_pricelist(plid: str, body: PriceListPatch, company=Depends(curr
 
 @router.delete("/{plid}")
 async def delete_pricelist(plid: str, company=Depends(current_company), _=Depends(require_roles("admin"))):
+    pl = await db.pricelists.find_one({"_id": plid})
+    if pl:
+        prods = [p async for p in db.products.find({"pricelist_id": plid})]
+        await audit(_, company, "pricelist.delete", f"Deleted price list {pl.get('name')} ({len(prods)} products)",
+                    {"pricelists": [pl], "products": prods})
     await db.products.delete_many({"pricelist_id": plid})
     await db.pricelists.delete_one({"_id": plid})
     return {"ok": True}

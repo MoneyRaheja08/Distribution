@@ -2,6 +2,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..audit import record as audit
 from ..auth import get_current_user, require_roles
 from ..deps import current_company
 from ..db import db
@@ -126,6 +127,11 @@ async def delete_bill(bid: str, company=Depends(current_company), _=Depends(requ
     b = await db.bills.find_one({"_id": bid, "company_id": company})
     if not b:
         raise HTTPException(404, "Bill not found")
+    sales = []
+    if b.get("source") == "sale_csv" and b.get("bill_no"):
+        sales = [s async for s in db.sales.find({"company_id": company, "dealer_id": b["dealer_id"], "bill_no": b["bill_no"]})]
+    await audit(_, company, "bill.delete", f"Deleted bill {b.get('bill_no') or '—'} · ₹{round(float(b.get('amount') or 0)):,} · {b.get('date') or ''}",
+                {"bills": [b], "sales": sales})
     await db.bills.delete_one({"_id": bid, "company_id": company})
     reverted = 0
     if b.get("source") == "sale_csv" and b.get("bill_no"):

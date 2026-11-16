@@ -94,3 +94,16 @@ curl -X POST localhost:8000/payments -H "Authorization: Bearer <collector token>
 - **PINs** are bcrypt-hashed. Change `JWT_SECRET` in `.env` before going live.
 - **Frontend:** point your React (Vite) app at this API. Set `CORS_ORIGINS` to
   your dev URL (`http://localhost:5173`) and later your deployed domain.
+
+## Tests
+```
+pip install -r requirements-dev.txt
+pytest -q
+```
+Runs against an in-memory database (nothing touches MongoDB). Covers FIFO ageing, login lockout,
+company scoping, reports agreeing with each other, the CN calculator, the audit trail and backup → restore.
+
+## Backup, restore, audit log
+Users page (admin) → **Full backup** downloads every collection for all companies as one JSON file.
+**Restore** loads that file back ("overwrite matching" or "replace everything"). The audit log lists every
+delete / rejected collection / undone import / restore; the removed records are kept in the `audit_log` collection.

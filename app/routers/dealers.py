@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pymongo import ReturnDocument
 
+from ..audit import record as audit
 from ..auth import get_current_user, is_staff, require_roles
 from ..deps import current_company
 from ..db import db
@@ -171,8 +172,13 @@ async def update_dealer(did: str, body: DealerPatch, company=Depends(current_com
 
 @router.delete("/{did}")
 async def delete_dealer(did: str, company=Depends(current_company), _=Depends(require_roles("admin"))):
-    if not await db.dealers.find_one({"_id": did, "company_id": company}):
+    d = await db.dealers.find_one({"_id": did, "company_id": company})
+    if not d:
         raise HTTPException(404, "Dealer not found")
+    bills = [b async for b in db.bills.find({"dealer_id": did})]
+    pays = [p async for p in db.payments.find({"dealer_id": did})]
+    await audit(_, company, "dealer.delete", f"Deleted dealer {d.get('name')} with {len(bills)} bills and {len(pays)} payments",
+                {"dealers": [d], "bills": bills, "payments": pays})
     await db.bills.delete_many({"dealer_id": did})
     await db.payments.delete_many({"dealer_id": did})
     await db.dealers.delete_one({"_id": did})
@@ -203,6 +209,12 @@ async def seed_ledger(did: str, body: SeedIn, company=Depends(current_company), 
             raise HTTPException(403, "You are not allowed to import statements")
         if await db.bills.count_documents({"dealer_id": did, "company_id": company}) > 0:
             raise HTTPException(403, "Statement already imported for this dealer — ask an admin to re-import")
+    old_bills = [b async for b in db.bills.find({"dealer_id": did})]
+    old_pays = [p async for p in db.payments.find({"dealer_id": did})]
+    if old_bills or old_pays:
+        dn = (await db.dealers.find_one({"_id": did}) or {}).get("name")
+        await audit(user, company, "dealer.reimport", f"Re-imported statement for {dn}: replaced {len(old_bills)} bills and {len(old_pays)} payments",
+                    {"bills": old_bills, "payments": old_pays})
     await db.bills.delete_many({"dealer_id": did})
     await db.payments.delete_many({"dealer_id": did})
     docs = []
@@ -240,6 +252,7 @@ async def merge_dealers(did: str, body: MergeIn, company=Depends(current_company
         src = await db.dealers.find_one({"_id": sid, "company_id": company})
         if not src:
             continue
+        await audit(_, company, "dealer.merge", f"Merged dealer {src.get('name')} into {target.get('name')}", {"dealers": [src]})
         await db.bills.update_many({"dealer_id": sid}, {"$set": {"dealer_id": did}})
         await db.payments.update_many({"dealer_id": sid}, {"$set": {"dealer_id": did}})
         await db.sales.update_many({"company_id": company, "dealer_id": sid}, {"$set": {"dealer_id": did}})

@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..audit import record as audit
 from ..auth import get_current_user, is_staff, require_roles
 from ..deps import current_company
 from ..db import db
@@ -115,5 +116,8 @@ async def execute_order(oid: str, body: ExecuteIn, company=Depends(current_compa
 
 @router.delete("/{oid}")
 async def delete_order(oid: str, company=Depends(current_company), _=Depends(staff_only)):
+    o = await db.orders.find_one({"_id": oid, "company_id": company})
+    if o:
+        await audit(_, company, "order.delete", f"Deleted order · {o.get('dealer_name') or '—'} · {o.get('date') or ''}", {"orders": [o]})
     await db.orders.delete_one({"_id": oid, "company_id": company})
     return {"ok": True}

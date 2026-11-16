@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from fastapi import HTTPException
+from ..loaders import ledger_maps
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
@@ -115,11 +116,7 @@ async def collections_report(frm: str = Query(alias="from"), to: str = Query(...
 @router.get("/ageing")
 async def ageing_report(company=Depends(current_company), _=Depends(admin)):
     dealers = [d async for d in db.dealers.find({"company_id": company})]
-    bills_by, pays_by = {}, {}
-    async for b in db.bills.find({"company_id": company}):
-        bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for p in db.payments.find({"company_id": company}):
-        pays_by.setdefault(p["dealer_id"], []).append(p)
+    bills_by, pays_by = await ledger_maps(company)
     ageing = {"age_0_30": 0, "age_31_60": 0, "age_61_90": 0, "age_90p": 0}
     total = 0; rows = []; over_limit = []
     for d in dealers:
@@ -183,11 +180,7 @@ async def sales_vs_collection(frm: str = Query(alias="from"), to: str = Query(..
 @router.get("/bill-ageing")
 async def bill_ageing(company=Depends(current_company), _=Depends(admin)):
     dealers = [d async for d in db.dealers.find({"company_id": company})]
-    bills_by, pays_by = {}, {}
-    async for b in db.bills.find({"company_id": company}):
-        bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for p in db.payments.find({"company_id": company}):
-        pays_by.setdefault(p["dealer_id"], []).append(p)
+    bills_by, pays_by = await ledger_maps(company)
     result = []
     for d in dealers:
         bd = bill_breakdown(bills_by.get(d["_id"], []), pays_by.get(d["_id"], []))
@@ -208,11 +201,7 @@ async def owed_by_brand(company=Depends(current_company), _=Depends(admin)):
         return (x or "").strip().lower()
 
     dealers = [d async for d in db.dealers.find({"company_id": company})]
-    bills_by, pays_by = {}, {}
-    async for b in db.bills.find({"company_id": company}):
-        bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for p in db.payments.find({"company_id": company}):
-        pays_by.setdefault(p["dealer_id"], []).append(p)
+    bills_by, pays_by = await ledger_maps(company)
     # (dealer_id, normalized bill_no) -> {brand: line value} from imported sale lines
     sales_by, sale_brands = {}, set()
     async for s in db.sales.find({"company_id": company}, {"dealer_id": 1, "bill_no": 1, "brand": 1, "amount": 1}):
@@ -535,11 +524,7 @@ async def profit2_report(frm: str = Query(alias="from"), to: str = Query(...), b
 
     # receivables (company-wide), prorated to the brand by its revenue share
     dealers = [d["_id"] async for d in db.dealers.find({"company_id": company}, {"_id": 1})]
-    bills_by, pays_by = {}, {}
-    async for b in db.bills.find({"company_id": company}):
-        bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for pmt in db.payments.find({"company_id": company}):
-        pays_by.setdefault(pmt["dealer_id"], []).append(pmt)
+    bills_by, pays_by = await ledger_maps(company)
     total_receivables = 0.0
     for did in dealers:
         total_receivables += compute(bills_by.get(did, []), pays_by.get(did, []))["outstanding"]
@@ -748,11 +733,7 @@ async def followup_report(min_days: int = 0, min_amount: float = 0, bucket: str 
     """Who to chase today: dealers with outstanding, sorted by amount, with phone, oldest-due days,
     last payment, and a per-bucket breakdown for a ready action list."""
     dealers = [d async for d in db.dealers.find({"company_id": company})]
-    bills_by, pays_by = {}, {}
-    async for b in db.bills.find({"company_id": company}):
-        bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for p in db.payments.find({"company_id": company}):
-        pays_by.setdefault(p["dealer_id"], []).append(p)
+    bills_by, pays_by = await ledger_maps(company)
     rows = []
     for d in dealers:
         bl = bills_by.get(d["_id"], []); pz = pays_by.get(d["_id"], [])

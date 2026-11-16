@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo import ReturnDocument
 
+from ..audit import record as audit
 from ..auth import get_current_user, require_roles
 from ..db import db
 from ..models import CompanyIn, CompanyPatch
@@ -50,5 +51,8 @@ async def rename_company(cid: str, body: CompanyPatch, _=Depends(require_roles("
 async def delete_company(cid: str, _=Depends(require_roles("admin"))):
     if await db.dealers.count_documents({"company_id": cid}) > 0:
         raise HTTPException(400, "Remove this company's dealers before deleting it")
+    c = await db.companies.find_one({"_id": cid})
+    if c:
+        await audit(_, cid, "company.delete", f"Deleted company {c.get('name')}", {"companies": [c]})
     await db.companies.delete_one({"_id": cid})
     return {"ok": True}

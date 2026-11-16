@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import check_production, settings
@@ -39,6 +40,11 @@ async def lifespan(app: FastAPI):
         await db.stock_units.create_index([("company_id", 1), ("imei", 1)])
         await db.stock_lots.create_index([("company_id", 1)])
         await db.import_batches.create_index([("company_id", 1)])
+        await db.sales.create_index([("company_id", 1), ("dealer_id", 1), ("bill_no", 1)])
+        await db.purchases.create_index([("company_id", 1), ("date", 1)])
+        await db.stock_units.create_index([("company_id", 1), ("status", 1), ("sale_date", 1)])
+        await db.payments.create_index([("company_id", 1), ("approved", 1)])
+        await db.audit_log.create_index([("company_id", 1), ("ts", -1)])
     except Exception:
         pass
     yield
@@ -54,6 +60,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Reports can be several hundred KB of JSON; compressing them makes phones on mobile data much faster.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.include_router(auth.router)
 app.include_router(companies.router)

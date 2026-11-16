@@ -1,11 +1,14 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-motor>=3.4
-pydantic>=2.6
-pydantic-settings>=2.2
-PyJWT>=2.7
-bcrypt>=4.1
-pypdf>=4.0
-python-multipart>=0.0.9
-openpyxl>=3.1
-xlrd>=2.0
+# Exact versions, so a rebuild on Render always installs the same thing that was tested.
+# To upgrade: change a number here, run `pip install -r requirements-dev.txt && pytest -q`, then deploy.
+fastapi==0.161.1
+uvicorn[standard]==0.54.0
+motor==3.7.1
+pymongo==4.19.0
+pydantic==2.13.5
+pydantic-settings==2.16.1
+PyJWT==2.15.0
+bcrypt==5.0.0
+pypdf==5.9.0
+python-multipart==0.0.32
+openpyxl==3.1.5
+xlrd==2.0.2

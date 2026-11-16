@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo import ReturnDocument
 
+from ..audit import record as audit
 from ..auth import hash_pin, require_roles
 from ..db import db
 from ..models import UserIn, UserPatch
@@ -85,5 +86,9 @@ async def update_user(uid: str, body: UserPatch, _=Depends(admin_only)):
 async def delete_user(uid: str, me=Depends(admin_only)):
     if uid == me["_id"]:
         raise HTTPException(400, "You cannot delete your own account")
+    u = await db.users.find_one({"_id": uid})
+    if u:
+        await audit(me, None, "user.delete", f"Deleted user {u.get('name')} ({u.get('role')})",
+                    {"users": [{k: v for k, v in u.items() if k != "pin_hash"}]})
     await db.users.delete_one({"_id": uid})
     return {"ok": True}

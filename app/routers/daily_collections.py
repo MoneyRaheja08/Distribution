@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 from pymongo import ReturnDocument
 
+from ..audit import record as audit
 from ..auth import get_current_user, hash_pin
 from ..deps import current_company
 from ..db import db
@@ -345,6 +346,12 @@ async def dc_calendar(month: str, company=Depends(dc_company), user=Depends(get_
 
 @router.delete("/bills/{bid}")
 async def delete_bill(bid: str, company=Depends(dc_company), _=Depends(get_current_user)):
+    b = await db.dc_bills.find_one({"_id": bid, "company_id": company})
+    if b:
+        await audit(_, company, "dc.bill.delete", f"Deleted DC bill {b.get('bill_no') or '—'} · {b.get('customer') or ''} · {b.get('date') or ''}", {
+            "dc_bills": [b],
+            "dc_exchanges": [x async for x in db.dc_exchanges.find({"bill_id": bid, "company_id": company})],
+            "dc_receipts": [x async for x in db.dc_receipts.find({"bill_id": bid, "company_id": company})]})
     await db.dc_bills.delete_one({"_id": bid, "company_id": company})
     await db.dc_exchanges.delete_many({"bill_id": bid, "company_id": company})
     await db.dc_receipts.delete_many({"bill_id": bid, "company_id": company})
@@ -723,6 +730,10 @@ async def create_expense(body: ExpenseIn, company=Depends(dc_company), user=Depe
 
 @router.delete("/expenses/{eid}")
 async def delete_expense(eid: str, company=Depends(dc_company), _=Depends(get_current_user)):
+    x = await db.dc_expenses.find_one({"_id": eid, "company_id": company})
+    if x:
+        await audit(_, company, "dc.expense.delete", f"Deleted DC expense · {x.get('category') or ''} · ₹{round(float(x.get('amount') or 0)):,} · {x.get('date') or ''}",
+                    {"dc_expenses": [x]})
     await db.dc_expenses.delete_one({"_id": eid, "company_id": company})
     return {"ok": True}
 

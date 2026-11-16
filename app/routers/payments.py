@@ -5,9 +5,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo import ReturnDocument
 
+from ..audit import record as audit
 from ..auth import get_current_user, is_staff, require_roles
 from ..deps import current_company
 from ..db import db
+from ..loaders import ledger_maps
 from ..ledger import compute, bill_breakdown
 from ..models import ApproveIn, ChequeUpdate, CollectIn, DepositIn, ReconcileIn
 from ..serializers import public_payment
@@ -15,6 +17,11 @@ from ..timeutil import today_ist
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 staff_only = require_roles("admin", "manager")
+
+
+def _pay_line(what, p):
+    return (f"{what} · {p.get('dealer_name') or '—'} · ₹{round(float(p.get('amount') or 0)):,} {p.get('mode') or ''}"
+            f" · {p.get('date') or ''} · by {p.get('collector_name') or '—'}")
 
 
 async def _next_receipt() -> int:
@@ -135,15 +142,18 @@ async def approve_payment(pid: str, body: ApproveIn, company=Depends(current_com
     if body.approved:
         await db.payments.update_one({"_id": pid}, {"$set": {"approved": True, "approved_by": _["name"]}})
     else:
+        await audit(_, company, "payment.reject", _pay_line("Rejected collection", p), {"payments": [p]})
         await db.payments.delete_one({"_id": pid})
     return {"ok": True}
 
 
 @router.delete("/{pid}")
 async def delete_payment(pid: str, company=Depends(current_company), _=Depends(require_roles("admin"))):
-    r = await db.payments.delete_one({"_id": pid, "company_id": company})
-    if r.deleted_count == 0:
+    p = await db.payments.find_one({"_id": pid, "company_id": company})
+    if not p:
         raise HTTPException(404, "Payment not found")
+    await audit(_, company, "payment.delete", _pay_line("Deleted payment", p), {"payments": [p]})
+    await db.payments.delete_one({"_id": pid, "company_id": company})
     return {"ok": True}
 
 
@@ -169,12 +179,8 @@ async def reconcile_payment(pid: str, body: ReconcileIn, company=Depends(current
 async def dashboard(company=Depends(current_company), _=Depends(staff_only)):
     dealers = [d async for d in db.dealers.find({"company_id": company, "show_on_overview": {"$ne": False}})]
     hidden_count = await db.dealers.count_documents({"company_id": company, "show_on_overview": False})
-    bills_by, pays_by = {}, {}
-    async for b in db.bills.find({"company_id": company}):
-        bills_by.setdefault(b["dealer_id"], []).append(b)
-    all_pays = [p async for p in db.payments.find({"company_id": company})]
-    for p in all_pays:
-        pays_by.setdefault(p["dealer_id"], []).append(p)
+    bills_by, pays_by = await ledger_maps(company)
+    all_pays = [p for ps in pays_by.values() for p in ps]
     today_d = today_ist()
     today = today_d.isoformat()
     total_out = over90 = 0

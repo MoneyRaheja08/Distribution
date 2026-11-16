@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ..loaders import ledger_maps
 from ..auth import get_current_user
 from ..deps import current_company
 from ..db import db
@@ -22,12 +23,12 @@ def _live(p):
 
 async def _ledger_ctx(company):
     dealers = {d["_id"]: d async for d in db.dealers.find({"company_id": company})}
-    bills_by, pays_by = {}, {}
-    async for b in db.bills.find({"company_id": company}):
-        bills_by.setdefault(b["dealer_id"], []).append(b)
-    async for p in db.payments.find({"company_id": company}):
-        if _live(p):
-            pays_by.setdefault(p["dealer_id"], []).append(p)
+    bills_by, all_pays = await ledger_maps(company)
+    pays_by = {}
+    for did, ps in all_pays.items():
+        live = [p for p in ps if _live(p)]
+        if live:
+            pays_by[did] = live
     return dealers, bills_by, pays_by
 
 
@@ -160,6 +161,9 @@ async def profit_by_dealer_detail(frm: str = Query(alias="from"), to: str = Quer
     return {"dealer": dealer, "from": frm, "to": to, "brand": [b.upper() for b in brand],
             "sale": round(sum(r["sale"] for r in rows)), "cost": round(sum(r["cost"] for r in rows)),
             "margin": round(sum(r["margin"] for r in rows)), "bills": len(rows), "rows": rows}
+
+
+@router.get("/dealer-scorecard")
 async def dealer_scorecard(frm: str = Query(alias="from"), to: str = Query(...),
                            company=Depends(current_company), _=Depends(profit_perm)):
     # Run the independent, read-only sub-queries concurrently.

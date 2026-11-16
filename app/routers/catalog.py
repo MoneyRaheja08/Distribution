@@ -7,6 +7,7 @@ from datetime import datetime, timezone, date, timedelta
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
+from ..audit import record as audit
 from ..auth import get_current_user, require_roles, is_staff
 from ..db import db
 from ..deps import current_company
@@ -533,6 +534,8 @@ async def undo_batch(batch_id: str, company=Depends(current_company), _=Depends(
             await db.stock_lots.update_one({"company_id": company, "brand": lot["brand"], "model": lot["model"]},
                                            {"$inc": {"in_qty": -lot["qty"]}})
         result.update({"purchases_removed": purchases_removed, "units_removed": removed_units, "units_kept_sold": kept_sold})
+    await audit(_, company, "import.undo", f"Undid {batch.get('kind')} import {batch.get('filename') or batch_id}: "
+                + ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in result.items() if k != "kind"))
     await db.import_batches.update_one({"_id": batch_id},
                                        {"$set": {"undone": True, "undone_at": datetime.now(timezone.utc).isoformat()}})
     return {"ok": True, **result}
