@@ -273,3 +273,53 @@ def test_every_address_the_app_calls_exists_on_the_server():
                 missing.append(method + " " + path)
     assert checked > 100, checked
     assert missing == [], missing
+
+
+# ---------------- trend chart data and global search ----------------
+def test_trend_ends_at_todays_outstanding_and_counts_only_live_payments(api):
+    from datetime import date
+    seed(api)
+    today = date.today()
+    months = (today.year - 2026) * 12 + (today.month - 7) + 1        # enough months to reach back to July 2026
+    api.insert("payments", [
+        {"_id": "pBounce", "company_id": api.A, "dealer_id": "d1", "amount": 700, "mode": "Cheque", "date": "2026-11-13",
+         "status": "bounced", "approved": True},
+        # an advance: d2 pays more than it owes — this must not reduce what d1 owes
+        {"_id": "pAdv", "company_id": api.A, "dealer_id": "d2", "amount": 5000, "mode": "Cash", "date": "2026-11-14",
+         "status": "cleared", "approved": True},
+    ])
+    r = api.get("/insights/trend", months=max(months, 6))
+    by = {x["month"]: x for x in r["rows"]}
+    assert len(r["rows"]) == max(months, 6) and r["rows"] == sorted(r["rows"], key=lambda x: x["month"])
+    assert by["2026-07"]["billed"] == 1000 and by["2026-09"]["billed"] == 2000 and by["2026-11"]["billed"] == 3800
+    assert by["2026-11"]["collected"] == 6500                           # 1500 + 5000; the bounced 700 is ignored
+    assert by["2026-07"]["outstanding"] == 1000 and by["2026-10"]["outstanding"] == 3000
+    assert by["2026-11"]["outstanding"] == 4500                         # d1 only; d2's advance is clipped at zero
+    assert r["rows"][-1]["outstanding"] == api.get("/reports/ageing")["total_outstanding"]
+    assert "2026-08" in by and by["2026-08"]["billed"] == 0 and by["2026-08"]["outstanding"] == 1000   # empty months are kept
+
+
+def test_search_finds_dealers_and_bills_in_this_company_only(api):
+    seed(api)
+    r = api.get("/insights/search", q="sharma")
+    assert [d["id"] for d in r["dealers"]] == ["d1"]
+    assert [d["id"] for d in api.get("/insights/search", q="90000 00002")["dealers"]] == ["d2"]      # phone, spaces ignored
+    r = api.get("/insights/search", q="b2")
+    assert [(b["bill_no"], b["dealer"], b["dealer_id"]) for b in r["bills"]] == [("B2", "Sharma Electronics", "d1")]
+    assert api.get("/insights/search", q="Z1") == {"dealers": [], "bills": []}                        # other company's bill
+    assert api.get("/insights/search", q="Other Co")["dealers"] == []
+    assert api.get("/insights/search", q="s") == {"dealers": [], "bills": []}                         # too short
+    assert api.get("/insights/search", q=".*") == {"dealers": [], "bills": []}                        # not treated as a pattern
+
+
+def test_collector_search_is_limited_to_own_dealers(api):
+    seed(api)
+    u = api.post("/users", {"name": "Ravi", "pin": "2222", "role": "collector", "company_ids": [api.A]}, company=None)
+    api.run(lambda: __import__("app.db", fromlist=["db"]).db.dealers.update_one({"_id": "d2"}, {"$set": {"collector_id": u["id"]}}))
+    tok = api.c.post("/auth/login", json={"name": "Ravi", "pin": "2222"}).json()["access_token"]
+    h = {"Authorization": "Bearer " + tok, "X-Company-Id": api.A}
+    r = api.c.get("/insights/search", headers=h, params={"q": "tr"}).json()          # "tr" is in both ElecTRonics and TRaders
+    assert [d["id"] for d in r["dealers"]] == ["d2"]
+    assert api.c.get("/insights/search", headers=h, params={"q": "B1"}).json()["bills"] == []         # d1's bill
+    assert [b["bill_no"] for b in api.c.get("/insights/search", headers=h, params={"q": "V1"}).json()["bills"]] == ["V1"]
+    assert api.c.get("/insights/trend", headers=h).status_code == 403
